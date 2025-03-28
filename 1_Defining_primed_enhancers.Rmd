@@ -1,0 +1,824 @@
+---
+title: "Defining_primed_enhancers"
+author: "ToddC"
+date: "15/03/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(root.dir="~/Enh_priming/")
+```
+
+
+
+```{r functions, include=FALSE, echo=F, message=F}
+
+####Functions####
+adjust.bed.size=function(df,size){
+  new.df=df
+  mid=round((df[,3]+df[,2])/2)
+  flank=round(size/2)
+  starts=mid-flank
+  starts[starts<1]=1
+  ends=mid+flank
+  new.df[,2]=starts
+  new.df[,3]=ends
+  return(new.df)
+}
+
+source("~/R/functions/bedtools_suite.R")
+library(tidyverse)
+
+#Transcriptional start sites to remove potential promoters
+#Ensembl gene annotations taken from Biomart 
+TSS=sortBed(read.delim("~/Enh_priming/Annotations/Human/ENSEMBL_all_TSS.txt",h=T))
+
+
+```
+
+Prepared the potential enhancer sets for further analysis by providing each enhancer coordinates with a unique ID which will be used throughout. 
+The generated files will be used as annotations for Seqmonk software for generating the ChIP-seq logRPKM and DNA methylation % counts. 
+
+This was done for canonical enhancers from both human and mouse early embryonic in vivo/in vitro H3K27ac ChIP-seq data sets. Additional enhancers identified through random-forest models from Xie et al 2013 for various hESC derived post-gastrulation tissues were also considered. 
+
+Human enhancers: 
+  - Pre-gastrulation
+      -Epiblast-like hESCs [Xie et al 2013]
+  - Post-gastrulation
+      -Neural progenitors [Xie et al 2013]
+      -Mesendoderm [Xie et al 2013]
+      -Mesencymal Stem cells [Xie et al 2013]
+  - Fetal Development
+      -7 post-conception week old brain [Reilly 2015]
+
+Mouse enhancers:
+  - Pre-gastrulation
+      -Pre-implantation Epiblast-like mESCs [Parry 2023]
+      -Post-implantation Epiblast-like mESCs [Parry 2023]
+  - Post-gastrulation
+      -E7.5 Ectoderm [Xiang 2020]
+      -E7.5 Endoderm [Xiang 2020]
+      -E7.5 Mesoderm [Xiang 2020]
+  - Fetal development
+      -E11.5 Heart
+      -E11.5 Liver
+      -E11.5 Forebrain
+      -E11.5 Midbrain
+      -E11.5 Hindbrain
+
+
+```{r prepping_human_enh_sites, echo=F}
+setwd("~/Enh_priming/")
+#started with Xie et al random forest model enhancers which were liftOver transferred to hg38 coordinates
+all.xie.enh=read.delim("./Annotations/Human/Xie_et_al_2013_coord_hg38.bed",h=F)
+all.xie.enh$coord=paste(all.xie.enh$V1,all.xie.enh$V2,all.xie.enh$V3,sep=":")
+#Generate a unique ID for each enhancer site
+all.lookup=unique(all.xie.enh[,4:5])
+unique.enh=unique(all.xie.enh[,c(1:3,5)])
+unique.enh=sortBed(unique.enh)
+colnames(unique.enh)=c("chr","start","end","coord")
+unique.enh$ID=paste0("XIE_ENH_",seq(1,nrow(unique.enh)))
+unique.enh=merge(unique.enh,all.lookup,by="coord")
+all.xie.enh=unique.enh[,c(2:6)]
+all.xie.enh=sortBed(all.xie.enh)
+rm(all.lookup,unique.enh)
+all.xie.enh=adjust.bed.size(all.xie.enh,10)
+write.table(all.xie.enh,"./Annotations/Human/Xie_enh_coord_hg38.txt",sep="\t",col.names = F,row.names = F,quote = F)
+
+
+##7 week fetal brain peaks
+brain=read.delim("./Annotations/Human/MACS/7pcw_enh_hg38.bed",h=F)
+#remove those which are potentially promoter sites
+brain=intersectBed(brain,adjust.bed.size(TSS,200),opt.string=" -v ")
+brain[,4]=paste0("7W_Brain_ENH",seq(1,nrow(brain)))
+write.table(brain,"./Annotations/Human/Enhancers/7W_Brain_Enh.txt",sep="\t",col.names = F,row.names = F,quote = F)
+
+rm(nec.k27,brain)
+
+```
+
+To identify lineage specific enhancer sub-groups additional screening was performed to remove enhancers which were found to overlap H3K27ac peaks within additional lineages. 
+```{r lineage_specific,echo=F,message=F}
+setwd("~/Enh_priming/")
+####Human####
+##Generated MACS peaks for H3K27ac for all cell lines and will use intersect to remove enhancers which overlap 
+peaks.h1=sortBed(read.delim("~/Enh_priming/Annotations/Human/MACS/H1_H3K27ac.bed",h=F))
+peaks.ME=sortBed(read.delim("~/Enh_priming/Annotations/Human/MACS/ME_H3K27ac.bed",h=F))
+peaks.NPC=sortBed(read.delim("~/Enh_priming/Annotations/Human/MACS/NPC_H3K27ac.bed",h=F))
+peaks.MSC=sortBed(read.delim("~/Enh_priming/Annotations/Human/MACS/MSC_H3K27ac.bed",h=F))
+all.xie.enh=read.delim("~/Enh_priming/Annotations/Human/Xie_enh_coord_hg38.txt",h=F)
+
+#Start with the "Lineage enriched" groups called by xie et al
+#Will then perform more stringent filtering for lineage specific enhancers by:
+# - Removing those which overlap xie-called enhancers active in other lineages
+# - Removing those which overlap H3K27ac MACS called peaks in other lineages
+
+
+
+npc.enr=adjust.bed.size(all.xie.enh[grepl("NPC_enriched", all.xie.enh$V5),],100)
+non.npc=adjust.bed.size(all.xie.enh[!grepl("NPC", all.xie.enh$V5),],100)
+npc.enr=intersectBed(npc.enr,non.npc,opt.string =" -v ")
+rm(non.npc)
+npc.enr=adjust.bed.size(npc.enr,1500)
+npc.enr=intersectBed(npc.enr,peaks.ME,opt.string = " -v ")
+npc.enr=intersectBed(npc.enr,peaks.MSC,opt.string=" -v ")
+npc.enr=intersectBed(npc.enr,peaks.h1,opt.string=" -v ")
+npc.enr=intersectBed(adjust.bed.size(npc.enr,500),adjust.bed.size(TSS,200),opt.string=" -v ")
+
+me.enr=adjust.bed.size(all.xie.enh[grepl("ME_enriched", all.xie.enh$V5),],100)
+non.me=adjust.bed.size(all.xie.enh[!grepl("ME", all.xie.enh$V5),],100)
+me.enr=intersectBed(me.enr,non.me,opt.string =" -v ")
+rm(non.me)
+me.enr=adjust.bed.size(me.enr,1500)
+me.enr=intersectBed(me.enr,peaks.NPC,opt.string = " -v ")
+me.enr=intersectBed(me.enr,peaks.MSC,opt.string=" -v ")
+me.enr=intersectBed(me.enr,peaks.h1,opt.string=" -v ")
+me.enr=intersectBed(adjust.bed.size(me.enr,500),adjust.bed.size(TSS,200),opt.string=" -v ")
+
+msc.enr=adjust.bed.size(all.xie.enh[grepl("MSC_enriched", all.xie.enh$V5),],100)
+non.msc=adjust.bed.size(all.xie.enh[!grepl("MSC", all.xie.enh$V5),],100)
+msc.enr=intersectBed(msc.enr,non.msc,opt.string =" -v ")
+rm(non.msc)
+msc.enr=adjust.bed.size(msc.enr,1500)
+msc.enr=intersectBed(msc.enr,peaks.NPC,opt.string = " -v ")
+msc.enr=intersectBed(msc.enr,peaks.ME,opt.string=" -v ")
+msc.enr=intersectBed(msc.enr,peaks.h1,opt.string=" -v ")
+msc.enr=intersectBed(adjust.bed.size(msc.enr,500),adjust.bed.size(TSS,200),opt.string=" -v ")
+
+write.table(npc.enr[,1:4],"./Annotations/Human/Enhancers/NPC_enh.txt",sep="\t",col.names = F,row.names = F,quote = F)
+write.table(me.enr[,1:4],"./Annotations/Human/Enhancers/ME_enh.txt",sep="\t",col.names = F,row.names = F,quote = F)
+write.table(msc.enr[,1:4],"./Annotations/Human/Enhancers/MSC_enh.txt",sep="\t",col.names = F,row.names = F,quote = F)
+
+
+
+##Getting lineage specific 7pcw Brain enh
+brain.enh=read.delim("./Annotations/Human/Enhancers/7W_Brain_Enh.txt",h=F)
+brain.enh=intersectBed(brain.enh,peaks.h1,opt.string=" -v ")
+brain.enh=intersectBed(brain.enh,peaks.MSC,opt.string=" -v ")
+brain.enh=intersectBed(brain.enh,peaks.ME,opt.string = " -v ")
+brain.enh=intersectBed(brain.enh,peaks.NPC,opt.string = " -v ")
+write.table(brain.enh,"./Annotations/Human/Enhancers/7W_Brain_specific_enh.txt",sep="\t",col.names = F,row.names = F,quote = F)
+
+
+#Calling hESC active enhancers
+#Begin with Xie et al H1 enriched enhancers and remove those overlaping the other lineages
+hesc.enr=adjust.bed.size(all.xie.enh[grepl("H1_enriched", all.xie.enh$V5),],100)
+non.hesc=adjust.bed.size(all.xie.enh[!grepl("H1", all.xie.enh$V5),],100)
+hesc.enr=intersectBed(hesc.enr,non.hesc,opt.string =" -v ")
+rm(non.hesc)
+hesc.enr=adjust.bed.size(hesc.enr,1500)
+hesc.enr=intersectBed(hesc.enr,peaks.NPC,opt.string = " -v ")
+hesc.enr=intersectBed(hesc.enr,peaks.ME,opt.string=" -v ")
+hesc.enr=intersectBed(hesc.enr,peaks.MSC,opt.string=" -v ")
+hesc.enr=intersectBed(adjust.bed.size(hesc.enr,500),adjust.bed.size(TSS,200),opt.string=" -v ")
+write.table(hesc.enr[,1:4],"./Annotations/Human/Enhancers/hESC_enh.txt",sep="\t",col.names = F,row.names = F,quote = F)
+
+rm(peaks.h1,peaks.ME,peaks.MSC,peaks.NPC,TSS,npc.enr,me.enr,msc.enr,hesc.enr,nec.enh,brain.enh)
+
+#Generating a combined file
+hesc=read.delim("~/Enh_priming/Annotations/Human/Enhancers/hESC_enh.txt",h=F)
+npc=read.delim("~/Enh_priming/Annotations/Human/Enhancers/NPC_enh.txt",h=F)
+me=read.delim("~/Enh_priming/Annotations/Human/Enhancers/ME_enh.txt",h=F)
+msc=read.delim("~/Enh_priming/Annotations/Human/Enhancers/MSC_enh.txt",h=F)
+brain.7w=read.delim("~/Enh_priming/Annotations/Human/Enhancers/7W_Brain_specific_enh.txt",h=F)
+
+comb=do.call(rbind,list(hesc,npc,me,msc,brain.7w))
+comb=sortBed(comb)
+write.table(comb,"~/Enh_priming/Annotations/Human/Enhancers/Comb_lineage_enh.txt",sep="\t",col.names = F,row.names = F,quote = F)
+```
+
+
+```{r prepping_mouse_enh_sites, echo=F}
+####Epiblast and E7.5 enhancers####
+tss.all=read.delim("./Annotations/Mouse/mm10_ENSEMBL_all_TSS.bed",h=F)
+tss.all=adjust.bed.size(tss.all,200)
+
+peak.mes=read.delim("./Annotations/Mouse/MACS/H3K27ac_distal_E7.5_Mes_specific.bed",h=F)
+peak.end=read.delim("./Annotations/Mouse/MACS/H3K27ac_distal_E7.5_End_specific.bed",h=F)
+peak.ect=read.delim("./Annotations/Mouse/MACS/H3K27ac_distal_E7.5_Ect_specific.bed",h=F)
+
+peak.esc.k27=read.delim("./Annotations/Mouse/MACS/Aled_2i_K27ac_peaks.bed",h=F)
+peak.epi.k27=read.delim("./Annotations/Mouse/MACS/Aled_EpiLC_K27ac_peaks.bed",h=F)
+
+
+enh.mes=intersectBed(peak.mes,peak.esc.k27,opt.string = " -v ")
+enh.mes=intersectBed(enh.mes,peak.epi.k27,opt.string = " -v ")
+enh.mes=enh.mes[enh.mes[,4]%in%intersectBed(adjust.bed.size(enh.mes,500),tss.all,opt.string = " -v ")[,4],]
+
+enh.end=intersectBed(peak.end,peak.esc.k27,opt.string = " -v ")
+enh.end=intersectBed(enh.end,peak.epi.k27,opt.string = " -v ")
+enh.end=enh.end[enh.end[,4]%in%intersectBed(adjust.bed.size(enh.end,500),tss.all,opt.string = " -v ")[,4],]
+
+enh.ect=intersectBed(peak.ect,peak.esc.k27,opt.string = " -v ")
+enh.ect=intersectBed(enh.ect,peak.epi.k27,opt.string = " -v ")
+enh.ect=enh.ect[enh.ect[,4]%in%intersectBed(adjust.bed.size(enh.ect,500),tss.all,opt.string = " -v ")[,4],]
+
+enh.esc=peak.esc.k27[peak.esc.k27[,4]%in%intersectBed(adjust.bed.size(peak.esc.k27,500),tss.all,opt.string = " -v ")[,4],]
+enh.epi=peak.epi.k27[peak.epi.k27[,4]%in%intersectBed(adjust.bed.size(peak.epi.k27,500),tss.all,opt.string = " -v ")[,4],]
+enh.epi=intersectBed(enh.epi,peak.esc.k27,opt.string="-v")
+enh.esc=sortBed(enh.esc)
+enh.esc[,4]=paste0("mESC_",seq(1:nrow(enh.esc)))
+enh.epi=sortBed(enh.epi)
+enh.epi[,4]=paste0("EpiLC_",seq(1:nrow(enh.epi)))
+
+enh.ect$class=rep("mECT")
+enh.end$class=rep("mEND")
+enh.mes$class=rep("mMES")
+enh.esc$class=rep("mESC")
+enh.epi$class=rep("mEpiLC")
+
+tog.df=do.call(rbind,list(enh.ect,enh.end,enh.mes,enh.esc,enh.epi))
+write.table(tog.df,"Annotations/Mouse/Enhancers/mouse_lineage_enhancers.txt",sep="\t",col.names=F,row.names=F,quote=F)
+
+
+
+####ENCODE E11.5 tissue enhancers####
+tissues=c("liver","heart","forebrain","midbrain","hindbrain","brain")
+peak.dir="./Annotations/Mouse/MACS/"
+peak.file="_e11_5_K27ac_peaks.bed"
+#loading tissue K27ac peak coords
+peaks.liver=read.delim(paste0(peak.dir,"liver",peak.file),h=F)
+peaks.heart=read.delim(paste0(peak.dir,"heart",peak.file),h=F)
+peaks.forebrain=read.delim(paste0(peak.dir,"forebrain",peak.file),h=F)
+peaks.midbrain=read.delim(paste0(peak.dir,"midbrain",peak.file),h=F)
+peaks.hindbrain=read.delim(paste0(peak.dir,"hindbrain",peak.file),h=F)
+
+#Potential promoter sites
+tss.all=read.delim("./Annotations/Mouse/mm10_ENSEMBL_all_TSS.bed",h=F)
+tss.all=adjust.bed.size(tss.all,200)
+
+#Early dev active regions
+peak.mes=read.delim("./Annotations/Mouse/MACS/H3K27ac_distal_E7.5_Mes_specific.bed",h=F)
+peak.end=read.delim("./Annotations/Mouse/MACS/H3K27ac_distal_E7.5_End_specific.bed",h=F)
+peak.ect=read.delim("./Annotations/Mouse/MACS/H3K27ac_distal_E7.5_Ect_specific.bed",h=F)
+peak.all.mes=read.delim("./Annotations/Mouse/MACS/MES_K27ac_peaks.bed",h=F)
+peak.all.end=read.delim("./Annotations/Mouse/MACS/END_K27ac_peaks.bed",h=F)
+peak.all.ect=read.delim("./Annotations/Mouse/MACS/ECT_K27ac_peaks.bed",h=F)
+peak.esc.k27=read.delim("./Annotations/Mouse/MACS/mESC_K27ac.bed",h=F)
+peak.epi.k27=read.delim("./Annotations/Mouse/MACS/EpiLC_K27ac.bed",h=F)
+early.dev.peaks=do.call(rbind,list(peak.mes,peak.end,peak.ect,peak.esc.k27,peak.epi.k27,peak.all.mes,peak.all.end,peak.all.ect))
+early.dev.peaks=sortBed(early.dev.peaks)
+rm(peak.mes,peak.end,peak.ect,peak.esc.k27,peak.epi.k27,peak.all.mes,peak.all.end,peak.all.ect)
+#e10.5 brain
+peak.10.fore=read.delim("./Annotations/Mouse/MACS/forebrain_e10_5_K27ac_peaks.bed",h=F)
+peak.10.mid=read.delim("./Annotations/Mouse/MACS/midbrain_e10_5_K27ac_peaks.bed",h=F)
+peak.10.hind=read.delim("./Annotations/Mouse/MACS/hindbrain_e10_5_K27ac_peaks.bed",h=F)
+brain.e10.peaks=do.call(rbind,list(peak.10.fore,peak.10.mid,peak.10.hind))
+brain.e10.peaks=sortBed(brain.e10.peaks)
+rm(peak.10.fore,peak.10.mid,peak.10.hind)
+
+enh.liver=intersectBed(peaks.liver,tss.all,opt.string = " -v ")
+non.liver=do.call(rbind,list(peaks.heart,peaks.forebrain,peaks.midbrain,peaks.hindbrain))
+enh.liver=intersectBed(enh.liver,early.dev.peaks,opt.string = "-v")
+enh.liver=intersectBed(enh.liver,non.liver,opt.string = "-v")
+enh.liver=intersectBed(enh.liver,brain.e10.peaks,opt.string = "-v")
+enh.liver[,4]=paste0("liver_",seq(1:nrow(enh.liver)))
+enh.liver[,5]=rep("liver")
+rm(non.liver)
+
+enh.heart=intersectBed(peaks.heart,tss.all,opt.string = " -v ")
+non.heart=do.call(rbind,list(peaks.liver,peaks.forebrain,peaks.midbrain,peaks.hindbrain))
+enh.heart=intersectBed(enh.heart,early.dev.peaks,opt.string = "-v")
+enh.heart=intersectBed(enh.heart,non.heart,opt.string = "-v")
+enh.heart=intersectBed(enh.heart,brain.e10.peaks,opt.string = "-v")
+enh.heart[,4]=paste0("heart_",seq(1:nrow(enh.heart)))
+enh.heart[,5]=rep("heart")
+rm(non.heart)
+
+enh.forebrain=intersectBed(peaks.forebrain,tss.all,opt.string = " -v ")
+non.forebrain=do.call(rbind,list(peaks.liver,peaks.heart,peaks.midbrain,peaks.hindbrain))
+enh.forebrain=intersectBed(enh.forebrain,early.dev.peaks,opt.string = "-v")
+enh.forebrain=intersectBed(enh.forebrain,non.forebrain,opt.string = "-v")
+enh.forebrain=intersectBed(enh.forebrain,brain.e10.peaks,opt.string = "-v")
+enh.forebrain[,4]=paste0("forebrain_",seq(1:nrow(enh.forebrain)))
+enh.forebrain[,5]=rep("forebrain")
+rm(non.forebrain)
+
+enh.midbrain=intersectBed(peaks.midbrain,tss.all,opt.string = " -v ")
+non.midbrain=do.call(rbind,list(peaks.liver,peaks.heart,peaks.forebrain,peaks.hindbrain))
+enh.midbrain=intersectBed(enh.midbrain,early.dev.peaks,opt.string = "-v")
+enh.midbrain=intersectBed(enh.midbrain,non.midbrain,opt.string = "-v")
+enh.midbrain=intersectBed(enh.midbrain,brain.e10.peaks,opt.string = "-v")
+enh.midbrain[,4]=paste0("midbrain_",seq(1:nrow(enh.midbrain)))
+enh.midbrain[,5]=rep("midbrain")
+rm(non.midbrain)
+
+enh.hindbrain=intersectBed(peaks.hindbrain,tss.all,opt.string = " -v ")
+non.hindbrain=do.call(rbind,list(peaks.liver,peaks.heart,peaks.forebrain,peaks.midbrain))
+enh.hindbrain=intersectBed(enh.hindbrain,early.dev.peaks,opt.string = "-v")
+enh.hindbrain=intersectBed(enh.hindbrain,non.hindbrain,opt.string = "-v")
+enh.hindbrain=intersectBed(enh.hindbrain,brain.e10.peaks,opt.string = "-v")
+enh.hindbrain[,4]=paste0("hindbrain_",seq(1:nrow(enh.hindbrain)))
+enh.hindbrain[,5]=rep("hindbrain")
+rm(non.hindbrain)
+
+enh.brain=intersectBed(read.delim("./Annotations/Mouse/MACS/E11_5_common_brain_enh.bed"),tss.all,opt.string = " -v ")
+non.brain=do.call(rbind,list(peaks.liver,peaks.heart))
+enh.brain=intersectBed(enh.brain,early.dev.peaks,opt.string = "-v")
+enh.brain=intersectBed(enh.brain,non.brain,opt.string = "-v")
+enh.brain=intersectBed(enh.brain,brain.e10.peaks,opt.string = "-v")
+enh.brain[,4]=paste0("brain_",seq(1:nrow(enh.brain)))
+enh.brain[,5]=rep("brain")
+rm(non.brain)
+
+tog.df=do.call(rbind,list(enh.liver,enh.heart,enh.forebrain,enh.midbrain,enh.hindbrain,enh.brain))
+write.table(tog.df,"Annotations/Mouse/Enhancers/E11_ENCODE_lineage_enhancers.txt",sep="\t",col.names=F,row.names=F,quote=F)
+```
+
+
+
+
+```{r calling_primed_subset}
+#####Human#####
+####Defining cutoffs for ChIP signals####
+set.k4me1=1.2
+set.k27ac=2.97
+set.k27me3=2
+
+####Xie enhs####
+#loading the enhancer groups
+enh.hNPC=read.delim("./Annotations/Human/Enhancers/NPC_enh.txt",h=F)
+enh.hMSC=read.delim("./Annotations/Human/Enhancers/MSC_enh.txt",h=F)
+enh.hME=read.delim("./Annotations/Human/Enhancers/ME_enh.txt",h=F)
+enh.hESC=read.delim("./Annotations/Human/Enhancers/hESC_enh.txt")
+#loading the RPKM values
+xie.rpkms=read.delim("./Data/human/ChIP/Xie_Enh_1_5kb_ChIP_logRPKM.txt")[,c(1,13:18)]
+#function for getting the lowest H3K4me1 "non-primed" group that is scaled to the size of the primed enhancer subset
+get.non.prim=function(enh.subset,prim.ids,count.df=rpkm){
+  num.enh=length(prim.ids)
+  df=xie.rpkms[xie.rpkms$Probe%in%enh.subset,]
+  df=df[!df$Probe%in%prim.ids,]
+  df=df[df$H1_K27ac<set.k27ac&df$H1_K27me3<set.k27me3,]
+  df=df[order(df$H1_K4me1,decreasing = F),]
+  non.prim.ids=df$Probe[1:num.enh]
+}
+
+
+ids.hesc=unique(enh.hESC[,4])
+
+ids.npc=unique(enh.hNPC[,4])
+ids.npc.prim=xie.rpkms$Probe[xie.rpkms$Probe%in%ids.npc&xie.rpkms$H1_K27ac<set.k27ac&xie.rpkms$H1_K4me1>set.k4me1&xie.rpkms$H1_K27me3<set.k27me3]
+ids.npc.nonprim=get.non.prim(ids.npc,ids.npc.prim)
+
+ids.me=unique(enh.hME[,4])
+ids.me.prim=xie.rpkms$Probe[xie.rpkms$Probe%in%ids.me&xie.rpkms$H1_K27ac<set.k27ac&xie.rpkms$H1_K4me1>set.k4me1&xie.rpkms$H1_K27me3<set.k27me3]
+ids.me.nonprim=get.non.prim(ids.me,ids.me.prim)
+
+ids.msc=unique(enh.hMSC[,4])
+ids.msc.prim=xie.rpkms$Probe[xie.rpkms$Probe%in%ids.msc&xie.rpkms$H1_K27ac<set.k27ac&xie.rpkms$H1_K4me1>set.k4me1&xie.rpkms$H1_K27me3<set.k27me3]
+ids.msc.nonprim=get.non.prim(ids.msc,ids.msc.prim)
+
+
+write.table(ids.npc.prim,"./Annotations/Human/Enhancers/NPC_prim_enh_ids.txt",sep="\t",col.names = F,row.names = F,quote = F)
+write.table(ids.npc.nonprim,"./Annotations/Human/Enhancers/NPC_nonprim_enh_ids.txt",sep="\t",col.names = F,row.names = F,quote = F)
+write.table(enh.hNPC[enh.hNPC[,4]%in%ids.npc.prim,],"./Annotations/Human/Enhancers/NPC_prim_enh.bed",sep="\t",col.names = F,row.names = F,quote = F)
+write.table(enh.hNPC[enh.hNPC[,4]%in%ids.npc.nonprim,],"./Annotations/Human/Enhancers/NPC_nonprim.bed",sep="\t",col.names = F,row.names = F,quote = F)
+
+write.table(ids.me.prim,"./Annotations/Human/Enhancers/ME_prim_enh_ids.txt",sep="\t",col.names = F,row.names = F,quote = F)
+write.table(ids.me.nonprim,"./Annotations/Human/Enhancers/ME_nonprim_enh_ids.txt",sep="\t",col.names = F,row.names = F,quote = F)
+write.table(enh.hME[enh.hME[,4]%in%ids.me.prim,],"./Annotations/Human/Enhancers/ME_prim_enh.bed",sep="\t",col.names = F,row.names = F,quote = F)
+write.table(enh.hME[enh.hME[,4]%in%ids.me.nonprim,],"./Annotations/Human/Enhancers/ME_nonprim_enh.bed",sep="\t",col.names = F,row.names = F,quote = F)
+
+write.table(ids.msc.prim,"./Annotations/Human/Enhancers/MSC_prim_enh_ids.txt",sep="\t",col.names = F,row.names = F,quote = F)
+write.table(ids.msc.nonprim,"./Annotations/Human/Enhancers/MSC_nonprim_enh_ids.txt",sep="\t",col.names = F,row.names = F,quote = F)
+write.table(enh.hMSC[enh.hMSC[,4]%in%ids.msc.prim,],"./Annotations/Human/Enhancers/MSC_prim_enh.bed",sep="\t",col.names = F,row.names = F,quote = F)
+write.table(enh.hMSC[enh.hMSC[,4]%in%ids.msc.nonprim,],"./Annotations/Human/Enhancers/MSC_nonprim_enh.bed",sep="\t",col.names = F,row.names = F,quote = F)
+
+
+
+####Primed 7pcw Brain enhs####
+
+enh.brain=read.delim("./Annotations/Human/Enhancers/7W_Brain_specific_enh.txt",h=F)
+brain.rpkms=read.delim("./Data/human/ChIP/7W_Brain_Enh_1_5kb_ChIP_logRPKM.txt")[,c(1,13:18)]
+get.non.prim=function(enh.subset,prim.ids,count.df=rpkm){
+  num.enh=length(prim.ids)
+  df=brain.rpkms[brain.rpkms$Probe%in%enh.subset,]
+  df=df[!df$Probe%in%prim.ids,]
+  df=df[df$H1_K27ac<set.k27ac&df$H1_K27me3<set.k27me3,]
+  df=df[order(df$H1_K4me1,decreasing = F),]
+  non.prim.ids=df$Probe[1:num.enh]
+}
+ids.brain=unique(enh.brain[,4])
+ids.brain.prim=brain.rpkms$Probe[brain.rpkms$Probe%in%ids.brain&brain.rpkms$H1_K27ac<set.k27ac&brain.rpkms$H1_K4me1>set.k4me1&brain.rpkms$H1_K27me3<set.k27me3]
+ids.brain.nonprim=get.non.prim(ids.brain,ids.brain.prim)
+
+write.table(ids.brain.prim,"./Annotations/Human/Enhancers/7W_brain_prim_enh_ids.txt",sep="\t",col.names = F,row.names = F,quote = F)
+write.table(ids.brain.nonprim,"./Annotations/Human/Enhancers/7W_brain_nonprim_enh_ids.txt",sep="\t",col.names = F,row.names = F,quote = F)
+write.table(enh.brain[enh.brain[,4]%in%ids.brain.prim,],"./Annotations/Human/Enhancers/7W_brain_prim_enh.bed",sep="\t",col.names = F,row.names = F,quote = F)
+write.table(enh.brain[enh.brain[,4]%in%ids.brain.nonprim,],"./Annotations/Human/Enhancers/7W_brain_nonprim_enh.bed",sep="\t",col.names = F,row.names = F,quote = F)
+
+
+####Combining the groups####
+class.names=c("hESC_specific",
+              "NPC_specific","NPC_prim","NPC_nonprim",
+              "ME_specific","ME_prim","ME_nonprim",
+              "MSC_specific","MSC_prim","MSC_nonprim",
+              "7W_brain_specific","7W_brain_prim","7W_brain_nonprim")
+id.files=c("~/Enh_priming/Annotations/Human/Enhancers/hESC_enh.txt",
+              "~/Enh_priming/Annotations/Human/Enhancers/NPC_enh.txt",
+              "~/Enh_priming/Annotations/Human/Enhancers/NPC_prim_enh.bed",
+              "~/Enh_priming/Annotations/Human/Enhancers/NPC_nonprim.bed",
+              "~/Enh_priming/Annotations/Human/Enhancers/ME_enh.txt",
+              "~/Enh_priming/Annotations/Human/Enhancers/ME_prim_enh.bed",
+              "~/Enh_priming/Annotations/Human/Enhancers/ME_nonprim_enh.bed",
+              "~/Enh_priming/Annotations/Human/Enhancers/MSC_enh.txt",
+              "~/Enh_priming/Annotations/Human/Enhancers/MSC_prim_enh.bed",
+              "~/Enh_priming/Annotations/Human/Enhancers/MSC_nonprim_enh.bed",
+              "~/Enh_priming/Annotations/Human/Enhancers/7W_Brain_specific_enh.txt",
+              "~/Enh_priming/Annotations/Human/Enhancers/7W_brain_prim_enh.bed",
+              "~/Enh_priming/Annotations/Human/Enhancers/7W_brain_nonprim_enh.bed")
+
+df.rows=list()
+for(i in 1:length(class.names)){
+  ids=read.delim(id.files[i],h=F)[,4]
+  df.rows[[i]]=data.frame(ID=ids,Class=rep(class.names[i]))
+}
+df.tog=do.call(rbind,df.rows)
+write.table(df.tog,"~/Enh_priming/Annotations/Human/Comb_Enh_class_lookup.txt",sep="\t",col.names = F,row.names = F,quote = F)
+
+####Fetal####
+previous.enh=read.delim("~/Enh_priming/Annotations/Human/Enhancers/Comb_lineage_enh.txt",h=F)
+colnames(previous.enh)=c("chr","start","end","ID")
+previous.lookup=read.delim("~/Enh_priming/Annotations/Human/Comb_Enh_class_lookup.txt",h=F)
+colnames(previous.lookup)=c("ID","class")
+previous=merge(previous.enh,previous.lookup,by="ID")[,c(2:4,1,5)]
+pre.fetal=previous[!grepl("brain",previous$class),]
+
+adrenal=read.delim("~/Enh_priming/Annotations/Human/MACS/EGA_Adrenal_K27ac.bed",h=F)
+kidney=read.delim("~/Enh_priming/Annotations/Human/MACS/EGA_Kidney_K27ac.bed",h=F)
+liver=read.delim("~/Enh_priming/Annotations/Human/MACS/EGA_Liver_K27ac.bed",h=F)
+lung=read.delim("~/Enh_priming/Annotations/Human/MACS/EGA_Lung_K27ac.bed",h=F)
+stomach=read.delim("~/Enh_priming/Annotations/Human/MACS/EGA_Stomach_K27ac.bed",h=F)
+ventricle=read.delim("~/Enh_priming/Annotations/Human/MACS/EGA_Ventricle_K27ac.bed",h=F)
+
+df.rows=list()
+peaks.list=list(adrenal, kidney, liver, lung, stomach, ventricle)
+peaks.names=c("adrenal","kidney","liver","lung","stomach","ventricle")
+for(i in 1:length(peaks.names)){
+  peaks=peaks.list[[i]]
+  peaks=intersectBed(peaks,adjust.bed.size(TSS,200),opt.string = "-v")
+  peaks[,5]=rep(peaks.names[i])
+  df.rows[[i]]=peaks
+}
+df.tog=do.call(rbind,df.rows)
+df.tog=sortBed(df.tog)
+df.tog[,4]=paste0("Fetal_",seq(1:nrow(df.tog)))
+write.table(df.tog,"~/Enh_priming/Annotations/Human/Enhancers/Fetal_enhancers.txt",sep="\t",col.names = F,row.names = F,quote = F)
+
+
+fetal.rpkms=read.delim("~/Enh_priming/Data/human/ChIP/Fetal_Enh_1_5kb_ChIP_logRPKM.txt")[,c(1,13:18)]
+get.non.prim=function(enh.subset,prim.ids,count.df=rpkm){
+  num.enh=length(prim.ids)
+  df=fetal.rpkms[fetal.rpkms$Probe%in%enh.subset,]
+  df=df[!df$Probe%in%prim.ids,]
+  df=df[df$H1_K27ac<set.k27ac&df$H1_K27me3<set.k27me3,]
+  df=df[order(df$H1_K4me1,decreasing = F),]
+  non.prim.ids=df$Probe[1:num.enh]
+}
+
+for(i in 1:length(peaks.names)){
+  enh.bed=df.tog[df.tog[,5]==peaks.names[i],]
+  non.lineage=df.tog[df.tog[,5]!=peaks.names[i],]
+  enh.bed=intersectBed(enh.bed,pre.fetal,opt.string = "-v")
+  enh.bed=intersectBed(enh.bed,non.lineage,opt.string = "-v")
+  ids=unique(enh.bed[,4])
+  ids.prim=fetal.rpkms$Probe[fetal.rpkms$Probe%in%ids&fetal.rpkms$H1_K27ac<set.k27ac&fetal.rpkms$H1_K4me1>set.k4me1&fetal.rpkms$H1_K27me3<set.k27me3]
+ids.nonprim=get.non.prim(ids,ids.prim)
+  write.table(enh.bed,paste0("~/Enh_priming/Annotations/Human/Enhancers/Fetal_",peaks.names[i],"_specific_enh.txt"),sep="\t",col.names = F,row.names = F,quote = F)
+  write.table(enh.bed[enh.bed[,4]%in%ids.prim,],paste0("~/Enh_priming/Annotations/Human/Enhancers/Fetal_",peaks.names[i],"_primed_enh.txt"),sep="\t",col.names = F,row.names = F,quote = F)
+  write.table(enh.bed[enh.bed[,4]%in%ids.nonprim,],paste0("~/Enh_priming/Annotations/Human/Enhancers/Fetal_",peaks.names[i],"_nonprimed_enh.txt"),sep="\t",col.names = F,row.names = F,quote = F)
+  }
+
+rm(peaks,peaks.list,pre.fetal,adrenal,df.rows,df.tog,enh.bed,fetal.rpkms,kidney,liver,lung,non.lineage,previous,previous.enh,previous.lookup,stomach,ventricle)
+####Adding Fetal Enhancers to lookups####
+comb=read.delim("~/Enh_priming/Annotations/Human/Enhancers/Comb_lineage_enh.txt",h=F)
+fetal.specific.files=list.files("~/Enh_priming/Annotations/Human/Enhancers/",pattern = "Fetal_")
+fetal.specific.files=fetal.specific.files[grepl("_specific_enh.txt",fetal.specific.files)]
+df.rows=list()
+for(i in fetal.specific.files){
+  df.rows[[i]]=read.delim(paste0("~/Enh_priming/Annotations/Human/Enhancers/",i),h=F)
+}
+df.tog=do.call(rbind,df.rows)
+comb2=rbind(comb,df.tog[,1:4])
+comb2=sortBed(comb2)
+write.table(comb2,"~/Enh_priming/Annotations/Human/Enhancers/Comb_lineage_enh_v2.txt",sep="\t",col.names = F,row.names = F,quote = F)
+lookup=read.delim("~/Enh_priming/Annotations/Human/Comb_Enh_class_lookup.txt",h=F)
+
+classes=unique(df.tog[,5])
+lookup.rows=list()
+for(i in fetal.specific.files){
+  class=gsub("Fetal_","",i)
+  class=gsub("_specific_enh.txt","",class)
+  n=gsub("specific","primed",i)
+  m=gsub("specific","nonprimed",i)
+  specific=read.delim(paste0("~/Enh_priming/Annotations/Human/Enhancers/",i),h=F)
+  specific[,5]=rep(paste0("Fetal_",class,"_specific"))
+  prim=read.delim(paste0("~/Enh_priming/Annotations/Human/Enhancers/",n),h=F)
+  prim[,5]=rep(paste0("Fetal_",class,"_prim"))
+  nonprim=read.delim(paste0("~/Enh_priming/Annotations/Human/Enhancers/",m),h=F)
+  nonprim[,5]=rep(paste0("Fetal_",class,"_nonprim"))
+  lookup.rows[[i]]=specific[,4:5]
+  lookup.rows[[n]]=prim[,4:5]
+  lookup.rows[[m]]=nonprim[,4:5]
+}
+lookup.tog=do.call(rbind,lookup.rows)
+colnames(lookup.tog)=colnames(lookup)
+write.table(lookup.tog,"~/Enh_priming/Annotations/Human/Fetal_Enh_class_lookup.txt",sep="\t",col.names = F,row.names = F,quote = F)
+write.table(rbind(lookup,lookup.tog),"~/Enh_priming/Annotations/Human/Comb_Enh_class_lookup_v2.txt",sep="\t",col.names = F,row.names = F,quote = F)
+#####Mouse#####
+####Defining cutoffs for ChIP signals####
+cutoff.esc.k4me1=-0.4
+cutoff.esc.k27ac=1.2
+cutoff.esc.k27me3=1.25
+
+####Gastrulation enhancers####
+rpkm=read.delim("Data/mouse/Mouse_Aled_TETKO_ChIP_logRPKM.txt")[,c(1,13:22)]
+colnames(rpkm)[1]="ID"
+
+
+prim.ect.ids=rpkm[rpkm[,1]%in%enh.ect[,4]&rpkm$X2i_H3K27ac<cutoff.esc.k27ac&rpkm$X2i_H3K4me1>cutoff.esc.k4me1&rpkm$X2i_H3K27me3<cutoff.esc.k27me3,1]
+nonprim.ect.ids=get.non.prim(enh.ect[,4],prim.ect.ids)
+
+prim.mes.ids=rpkm[rpkm[,1]%in%enh.mes[,4]&rpkm$X2i_H3K27ac<cutoff.esc.k27ac&rpkm$X2i_H3K4me1>cutoff.esc.k4me1&rpkm$X2i_H3K27me3<cutoff.esc.k27me3,1]
+nonprim.mes.ids=get.non.prim(enh.mes[,4],prim.mes.ids)
+
+prim.end.ids=rpkm[rpkm[,1]%in%enh.end[,4]&rpkm$X2i_H3K27ac<cutoff.esc.k27ac&rpkm$X2i_H3K4me1>cutoff.esc.k4me1&rpkm$X2i_H3K27me3<cutoff.esc.k27me3,1]
+nonprim.end.ids=get.non.prim(enh.end[,4],prim.end.ids)
+
+prim.epilc.ids=rpkm[rpkm[,1]%in%enh.epi[,4]&rpkm$X2i_H3K27ac<cutoff.esc.k27ac&rpkm$X2i_H3K4me1>cutoff.esc.k4me1&rpkm$X2i_H3K27me3<cutoff.esc.k27me3,1]
+nonprim.epilc.ids=get.non.prim(enh.epi[,4],prim.epilc.ids)
+
+enh.bed=unique(tog.df[,1:4])
+write.ids.bed=function(ids,name){
+  sub.bed=enh.bed[enh.bed$V4%in%ids,]
+  sub.bed$class=rep(name)
+  sub.bed=adjust.bed.size(sub.bed,500)
+  write.table(sub.bed,paste0("./Annotations/Mouse/Enhancers/",name,".bed"),sep="\t",col.names = F,row.names = F,quote = F)
+}
+
+write.ids.bed(prim.ect.ids,"mECT_prim")
+write.ids.bed(nonprim.ect.ids,"mECT_nonprim")
+write.ids.bed(enh.ect[,4],"mECT_specific")
+
+write.ids.bed(prim.end.ids,"mEND_prim")
+write.ids.bed(nonprim.end.ids,"mEND_nonprim")
+write.ids.bed(enh.end[,4],"mEND_specific")
+
+write.ids.bed(prim.mes.ids,"mMES_prim")
+write.ids.bed(nonprim.mes.ids,"mMES_nonprim")
+write.ids.bed(enh.mes[,4],"mMES_specific")
+
+write.ids.bed(prim.epilc.ids,"mEpiLC_prim")
+write.ids.bed(nonprim.epilc.ids,"mEpiLC_nonprim")
+write.ids.bed(enh.epi[,4],"mEpiLC_specific")
+
+write.ids.bed(enh.esc[,4],"mESC_enh")
+
+ids=list(prim.ect.ids,nonprim.ect.ids,enh.ect[,4],
+         prim.end.ids,nonprim.end.ids,enh.end[,4],
+         prim.mes.ids,nonprim.mes.ids,enh.mes[,4],
+         prim.epilc.ids,nonprim.epilc.ids,enh.epi[,4],
+         enh.esc[,4])
+class.names=c("mECT_prim","mECT_nonprim","mECT_specific",
+              "mEND_prim","mEND_nonprim","mEND_specific",
+              "mMES_prim","mMES_nonprim","mMES_specific",
+              "mEpiLC_prim","mEpiLC_nonprim","mEpiLC_specific","mESC_enh")
+
+df.rows=list()
+for(i in 1:length(class.names)){
+  df.rows[[i]]=data.frame(id=ids[[i]],class=rep(class.names[i]))
+}
+lookup=do.call(rbind,df.rows)
+write.table(lookup,"Annotations/Mouse/Enh_class_lookup.txt",sep="\t",col.names = F,row.names = F,quote = F)
+
+####ENCODE E11.5 Enhancers####
+rpkm=read.delim("Data/mouse/E11_ENCODE_Aled_TETKO_ChIP_logRPKM.txt")[,c(1,13:22)]
+colnames(rpkm)[1]="ID"
+
+enh.bed=unique(read.delim("Annotations/Mouse/Enhancers/E11_ENCODE_lineage_enhancers.txt",h=F)[,1:4])
+write.ids.bed=function(ids,name){
+  sub.bed=enh.bed[enh.bed$V4%in%ids,]
+  sub.bed$class=rep(name)
+  sub.bed=adjust.bed.size(sub.bed,500)
+  write.table(sub.bed,paste0("./Annotations/Mouse/Enhancers/",name,".bed"),sep="\t",col.names = F,row.names = F,quote = F)
+}
+
+prim.liver.ids=rpkm[rpkm[,1]%in%enh.liver[,4]&rpkm$X2i_H3K27ac<cutoff.esc.k27ac&rpkm$X2i_H3K4me1>cutoff.esc.k4me1&rpkm$X2i_H3K27me3<cutoff.esc.k27me3,1]
+nonprim.liver.ids=get.non.prim(enh.liver[,4],prim.liver.ids)
+write.ids.bed(prim.liver.ids,"liver_prim")
+write.ids.bed(nonprim.liver.ids,"liver_nonprim")
+write.ids.bed(enh.liver[,4],"liver_specific")
+
+prim.heart.ids=rpkm[rpkm[,1]%in%enh.heart[,4]&rpkm$X2i_H3K27ac<cutoff.esc.k27ac&rpkm$X2i_H3K4me1>cutoff.esc.k4me1&rpkm$X2i_H3K27me3<cutoff.esc.k27me3,1]
+nonprim.heart.ids=get.non.prim(enh.heart[,4],prim.heart.ids)
+write.ids.bed(prim.heart.ids,"heart_prim")
+write.ids.bed(nonprim.heart.ids,"heart_nonprim")
+write.ids.bed(enh.heart[,4],"heart_specific")
+
+prim.forebrain.ids=rpkm[rpkm[,1]%in%enh.forebrain[,4]&rpkm$X2i_H3K27ac<cutoff.esc.k27ac&rpkm$X2i_H3K4me1>cutoff.esc.k4me1&rpkm$X2i_H3K27me3<cutoff.esc.k27me3,1]
+nonprim.forebrain.ids=get.non.prim(enh.forebrain[,4],prim.forebrain.ids)
+write.ids.bed(prim.forebrain.ids,"forebrain_prim")
+write.ids.bed(nonprim.forebrain.ids,"forebrain_nonprim")
+write.ids.bed(enh.forebrain[,4],"forebrain_specific")
+
+prim.midbrain.ids=rpkm[rpkm[,1]%in%enh.midbrain[,4]&rpkm$X2i_H3K27ac<cutoff.esc.k27ac&rpkm$X2i_H3K4me1>cutoff.esc.k4me1&rpkm$X2i_H3K27me3<cutoff.esc.k27me3,1]
+nonprim.midbrain.ids=get.non.prim(enh.midbrain[,4],prim.midbrain.ids)
+write.ids.bed(prim.midbrain.ids,"midbrain_prim")
+write.ids.bed(nonprim.midbrain.ids,"midbrain_nonprim")
+write.ids.bed(enh.midbrain[,4],"midbrain_specific")
+
+prim.hindbrain.ids=rpkm[rpkm[,1]%in%enh.hindbrain[,4]&rpkm$X2i_H3K27ac<cutoff.esc.k27ac&rpkm$X2i_H3K4me1>cutoff.esc.k4me1&rpkm$X2i_H3K27me3<cutoff.esc.k27me3,1]
+nonprim.hindbrain.ids=get.non.prim(enh.hindbrain[,4],prim.hindbrain.ids)
+write.ids.bed(prim.hindbrain.ids,"hindbrain_prim")
+write.ids.bed(nonprim.hindbrain.ids,"hindbrain_nonprim")
+write.ids.bed(enh.hindbrain[,4],"hindbrain_specific")
+
+prim.brain.ids=rpkm[rpkm[,1]%in%enh.brain[,4]&rpkm$X2i_H3K27ac<cutoff.esc.k27ac&rpkm$X2i_H3K4me1>cutoff.esc.k4me1&rpkm$X2i_H3K27me3<cutoff.esc.k27me3,1]
+nonprim.brain.ids=get.non.prim(enh.brain[,4],prim.brain.ids)
+write.ids.bed(prim.brain.ids,"brain_prim")
+write.ids.bed(nonprim.brain.ids,"brain_nonprim")
+write.ids.bed(enh.brain[,4],"brain_specific")
+
+ids=list(prim.liver.ids,nonprim.liver.ids,enh.liver[,4],
+         prim.heart.ids,nonprim.heart.ids,enh.heart[,4],
+         prim.forebrain.ids,nonprim.forebrain.ids,enh.forebrain[,4],
+         prim.midbrain.ids,nonprim.midbrain.ids,enh.midbrain[,4],
+         prim.hindbrain.ids,nonprim.hindbrain.ids,enh.hindbrain[,4],
+         prim.brain.ids,nonprim.brain.ids,enh.brain[,4])
+class.names=c("liver_prim","liver_nonprim","liver_specific",
+              "heart_prim","heart_nonprim","heart_specific",
+              "forebrain_prim","forebrain_nonprim","forebrain_specific",
+              "midbrain_prim","midbrain_nonprim","midbrain_specific",
+              "hindbrain_prim","hindbrain_nonprim","hindbrain_specific",
+              "brain_prim","brain_nonprim","brain_specific")
+
+df.rows=list()
+for(i in 1:length(class.names)){
+  df.rows[[i]]=data.frame(id=ids[[i]],class=rep(class.names[i]))
+}
+lookup=do.call(rbind,df.rows)
+write.table(lookup,"Annotations/Mouse/E11_ENCODE_Enh_class_lookup.txt",sep="\t",col.names = F,row.names = F,quote = F)
+####Combining the groups####
+gast=read.delim("./Annotations/Mouse/Enh_class_lookup.txt",h=F)
+E11=read.delim("./Annotations/Mouse/E11_ENCODE_Enh_class_lookup.txt",h=F)
+tog=rbind(gast,E11)
+write.table(tog,"./Annotations/Mouse/Comb_Enh_class_lookup.txt",sep="\t",col.names = F,row.names = F,quote = F)
+
+gast=read.delim("~/Enh_priming/Annotations/Mouse/Enhancers/mouse_lineage_enhancers.txt",h=F)
+E11=read.delim("~/Enh_priming/Annotations/Mouse/Enhancers/E11_ENCODE_lineage_enhancers.txt",h=F)
+tog=rbind(gast,E11)
+write.table(tog,"~/Enh_priming/Annotations/Mouse/Enhancers/Comb_lineage_enhancers.txt",sep="\t",col.names = F,row.names = F,quote = F)
+
+```
+
+
+
+
+
+
+```{r homer_annotate_peaks, echo=F, message=FALSE, warning=FALSE}
+
+annotatepeaks <- function(bed.file,tag,ref.genome,path.to.homer='') {
+  out = tempfile()
+  
+  command = paste('perl ',path.to.homer,'annotatePeaks.pl ',bed.file,' ',ref.genome, '-size given -hist 100 -ghist -d ',tag,' > ',out,sep='')
+  cat(command,'\n')
+  try(system(command))
+  res = read.table(out,header=T,as.is=T)
+  
+  unlink(out)
+  return(res)
+}
+##set working directory
+
+setwd('~/Enh_priming/Homer_tag_dir/')
+
+##set directories for homerTag directories
+
+tag.dir = '~/Enh_priming/Homer_tag_dir/human/'
+tag.list =c("H1_K27ac","H1_K4me1","H1_K27me3","NPC_K27ac","NPC_K4me1","ME_K27ac","ME_K4me1","MSC_K27ac","MSC_K4me1")
+
+##Set bed file for heatmaps
+bed.file = '../Xie_enh_coord_hg38.txt'
+
+##Set path to homer
+homer = '/bi/apps/homer/4.11/bin/'
+
+#set out directory
+outdir='~/Enh_priming/Homer_hist/'
+###Annotate Peaks function from Homer Package
+temp.bed.file<-tempfile()
+bed<-unique(read.delim(bed.file,h=F)[,1:4])
+bed[,1]=gsub("chr","",bed[,1])
+bed=adjust.bed.size(bed,6000)
+bed[,5]=rep(1)
+bed[,6]=rep("+")
+
+write.table(bed,file=temp.bed.file,quote=F,sep='\t',col.names=F,row.names=F)
+
+for(i in 1:length(tag.list)){
+  full.tag.dir<-paste(tag.dir,tag.list[i],sep="")
+  tag.hist<-annotatepeaks(bed.file = temp.bed.file,tag=full.tag.dir,ref.genome = ' hg38 ',path.to.homer = homer)
+  write.table(tag.hist,paste(outdir,tag.list[i],"_hist.txt",sep=""),sep="\t",quote=F,row.names = F,col.names = T)
+}
+unlink(temp.bed.file)
+
+```
+
+
+```{r}
+
+
+```
+
+
+
+
+####Code for commands performed in Unix:
+
+####Bash script for getting RPKM
+
+[deeptools2 v3.5.1]
+
+awk '{print $1 ":" $2 ":" $3}' Xie_enh_1kb.bed >tmp.bed
+while read POS; do
+  bamCoverage -b ~/Enh_priming/ChIP/H1_K27ac.sorted.bam -r ${POS} -of bedgraph -o tmp.bg --normalizeUsing RPKM
+  awk '{ sum += $4; } END { print sum/NR }' tmp.bg | awk -v x=$POS '{print x "\t" $1}' >>Xie_H1_K27ac_RPKM.txt
+done < tmp.bed
+
+NPC K27ac SK504 SRR316161 
+NPC K27ac AY15 SRR445376
+NPC K27ac AK408 SRR518285
+NPC K27ac AK220 SRR353317
+MSC K27ac SK438 SRR316160
+MSC K27ac SK436 SRR316159
+ME K27ac SK340 SRR304974
+ME K27ac AK313 SRR401264
+ME K27ac AK310 SRR400583
+ME K27ac AK147 SRR304975
+H1 K27ac SAK270 SRR179707
+H1 K27ac LL313
+
+H1 K4me1 LL311
+H1 k4me1 SRR018456
+NPC K4me1 AK198 SRR353325
+NPC K4me1 AK242 SRR353326
+NPC K4me1 CY25 SRR578688
+ME H4me1 AK133 SRR305011
+ME K4me1 AK163 SRR305012
+MSC K4me1 SK461 SRR304966
+MSC K4me1 SK465 SRR316165
+
+####Homer tools used to analyse ChIP-seq and ATAC data
+
+[samtools v1.11]
+[homer v4.11]
+
+#Human tag directories
+
+makeTagDirectory H1_K4me1 -genome ~/Packages/Homer/data/genomes/hg38 -fragLength 300 /bi/pubcache/TIDIED/Xie_2013_2/ChIP/first_round/LL311/LL311_GRCh38_bowtie.bam /bi/pubcache/TIDIED/Xie_2013_2/ChIP/first_round/H3K4me1_H1/SRR018456_1_GRCh38_bowtie.bam
+makeTagDirectory H1_K27ac -genome ~/Packages/Homer/data/genomes/hg38 -fragLength 300 /bi/pubcache/TIDIED/Xie_2013_2/ChIP/first_round/LL313/LL313_GRCh38_bowtie.bam /bi/pubcache/TIDIED/Xie_2013_2/ChIP/first_round/SAK270/SRR179707_1_GRCh38_bowtie.bam 
+makeTagDirectory H1_K27me3 -genome ~/Packages/Homer/data/genomes/hg38 -fragLength 300 /bi/pubcache/TIDIED/Xie_2013_2/ChIP/second_round/Aligned/SRR933993_AY830_1_trimmed_GRCh38_bowtie2.bam /bi/pubcache/TIDIED/Xie_2013_2/ChIP/second_round/Aligned/SRR933992_AY830_1_trimmed_GRCh38_bowtie2.bam /bi/pubcache/TIDIED/Xie_2013_2/ChIP/second_round/Aligned/SRR029349_LL314_1_trimmed_GRCh38_bowtie2.bam /bi/pubcache/TIDIED/Xie_2013_2/ChIP/second_round/Aligned/SRR029347_LL314_1_trimmed_GRCh38_bowtie2.bam /bi/pubcache/TIDIED/Xie_2013_2/ChIP/second_round/Aligned/SRR029345_LL314_1_trimmed_GRCh38_bowtie2.bam /bi/pubcache/TIDIED/Xie_2013_2/ChIP/second_round/Aligned/SRR029343_LL314_1_trimmed_GRCh38_bowtie2.bam /bi/pubcache/TIDIED/Xie_2013_2/ChIP/second_round/Aligned/SRR019561_1_trimmed_GRCh38_bowtie2.bam /bi/pubcache/TIDIED/Xie_2013_2/ChIP/second_round/Aligned/SRR067943_1_trimmed_GRCh38_bowtie2.bam 
+
+makeTagDirectory ME_K4me1 -genome ~/Packages/Homer/data/genomes/hg38 -fragLength 300 /bi/pubcache/TIDIED/Xie_2013_2/ChIP/first_round/AK133/SRR305011_1_GRCh38_bowtie.bam /bi/pubcache/TIDIED/Xie_2013_2/ChIP/first_round/AK163/SRR305012_1_GRCh38_bowtie.bam
+makeTagDirectory ME_K27ac -genome ~/Packages/Homer/data/genomes/hg38 -fragLength 300 /bi/pubcache/TIDIED/Xie_2013_2/ChIP/first_round/AK147/SRR304975_1_GRCh38_bowtie.bam /bi/pubcache/TIDIED/Xie_2013_2/ChIP/first_round/AK310/SRR400583_1_GRCh38_bowtie.bam /bi/pubcache/TIDIED/Xie_2013_2/ChIP/first_round/AK313/SRR401264_1_GRCh38_bowtie.bam /bi/pubcache/TIDIED/Xie_2013_2/ChIP/first_round/SK340/SRR304974_1_GRCh38_bowtie.bam 
+
+makeTagDirectory MSC_K4me1 -genome ~/Packages/Homer/data/genomes/hg38 -fragLength 300 /bi/pubcache/TIDIED/Xie_2013_2/ChIP/first_round/SK461/SRR304966_1_GRCh38_bowtie.bam /bi/pubcache/TIDIED/Xie_2013_2/ChIP/first_round/SK465/SRR316165_1_GRCh38_bowtie.bam 
+makeTagDirectory MSC_K27ac -genome ~/Packages/Homer/data/genomes/hg38 -fragLength 300 /bi/pubcache/TIDIED/Xie_2013_2/ChIP/first_round/SK436/SRR316159_1_GRCh38_bowtie.bam /bi/pubcache/TIDIED/Xie_2013_2/ChIP/first_round/SK438/SRR316160_1_GRCh38_bowtie.bam
+
+makeTagDirectory NPC_K27ac -genome ~/Packages/Homer/data/genomes/hg38 -fragLength 300 /bi/pubcache/TIDIED/Xie_2013_2/ChIP/first_round/AK220/SRR353317_1_GRCh38_bowtie.bam /bi/pubcache/TIDIED/Xie_2013_2/ChIP/first_round/AK408/SRR518285_1_trimmed_GRCh38_bowtie2.bam /bi/pubcache/TIDIED/Xie_2013_2/ChIP/first_round/AY15/SRR445376_1_GRCh38_bowtie.bam /bi/pubcache/TIDIED/Xie_2013_2/ChIP/first_round/SK451/SRR304958_1_GRCh38_bowtie.bam /bi/pubcache/TIDIED/Xie_2013_2/ChIP/first_round/SK504/SRR316161_1_GRCh38_bowtie.bam
+makeTagDirectory NPC_K4me1 -genome ~/Packages/Homer/data/genomes/hg38 -fragLength 300 /bi/pubcache/TIDIED/Xie_2013_2/ChIP/first_round/AK198/SRR353325_1_GRCh38_bowtie.bam /bi/pubcache/TIDIED/Xie_2013_2/ChIP/first_round/AK242/SRR353326_1_GRCh38_bowtie.bam /bi/pubcache/TIDIED/Xie_2013_2/ChIP/first_round/CY25/SRR578688_1_trimmed_GRCh38_bowtie2.bam
+
+#Mouse tag directories
+
+makeTagDirectory mESC_K27ac -genome ~/Packages/Homer/data/genomes/mm10 -fragLength 300 /bi/pubcache/TIDIED/Buecker_2014/Aligned/SRR1202459_GSM1355158_H3K27ac_ESC_rep1_Mus_musculus_ChIP-Seq_GRCm38_bowtie2.bam /bi/pubcache/TIDIED/Buecker_2014/Aligned/SRR1202460_GSM1355159_H3K27ac_ESC_rep2_Mus_musculus_ChIP-Seq_GRCm38_bowtie2.bam
+
+
+makeTagDirectory mESC_K4me1  -genome ~/Packages/Homer/data/genomes/mm10 -fragLength 300  /bi/pubcache/TIDIED/Buecker_2014/Aligned/SRR1202461_GSM1355160_H3K4me1_ESC_rep1_Mus_musculus_ChIP-Seq_GRCm38_bowtie2.bam /bi/pubcache/TIDIED/Buecker_2014/Aligned/SRR1202462_GSM1355161_H3K4me1_ESC_rep2_Mus_musculus_ChIP-Seq_GRCm38_bowtie2.bam
+
+makeTagDirectory mESC_ChIP_input  -genome ~/Packages/Homer/data/genomes/mm10 -fragLength 300 /bi/pubcache/TIDIED/Buecker_2014/Aligned/SRR1202464_GSM1355163_Input_ESC_rep1_Mus_musculus_ChIP-Seq_GRCm38_bowtie2.bam /bi/pubcache/TIDIED/Buecker_2014/Aligned/SRR1202465_GSM1355164_Input_ESC_rep2_Mus_musculus_ChIP-Seq_GRCm38_bowtie2.bam
+
+makeTagDirectory mEpiLC_K27ac  -genome ~/Packages/Homer/data/genomes/mm10 -fragLength 300 /bi/pubcache/TIDIED/Buecker_2014/Aligned/SRR1202472_GSM1355171_H3K27ac_EpiLC_plusActivin_Mus_musculus_ChIP-Seq_GRCm38_bowtie2.bam
+
+makeTagDirectory mEpiLC_K4me1  -genome ~/Packages/Homer/data/genomes/mm10 -fragLength 300 /bi/pubcache/TIDIED/Buecker_2014/Aligned/SRR1202474_GSM1355173_H3K4me1_EpiLC_plusActivinA_Mus_musculus_ChIP-Seq_GRCm38_bowtie2.bam
+
+makeTagDirectory mEpiLC_ChIP_input  -genome ~/Packages/Homer/data/genomes/mm10 -fragLength 300  /bi/pubcache/TIDIED/Buecker_2014/Aligned/SRR1202477_GSM1355176_Input_EpiLC_plusActivinA_Mus_musculus_ChIP-Seq_GRCm38_bowtie2.bam
+
+makeTagDirectory mECT_K27ac -genome ~/Packages/Homer/data/genomes/mm10 -fragLength 300 /bi/pubcache/TIDIED/Xiang_2019/ChIP-seq/PE/Aligned/SRR8454503_GSM3568894_ChIP_Ect_H3K27ac_rep1_Mus_musculus_ChIP-Seq_1_val_1_GRCm38_bowtie2.bam /bi/pubcache/TIDIED/Xiang_2019/ChIP-seq/PE/Aligned/SRR8454504_GSM3568894_ChIP_Ect_H3K27ac_rep1_Mus_musculus_ChIP-Seq_1_val_1_GRCm38_bowtie2.bam /bi/pubcache/TIDIED/Xiang_2019/ChIP-seq/PE/Aligned/SRR8454505_GSM3568894_ChIP_Ect_H3K27ac_rep1_Mus_musculus_ChIP-Seq_1_val_1_GRCm38_bowtie2.bam /bi/pubcache/TIDIED/Xiang_2019/ChIP-seq/PE/Aligned/SRR8454506_GSM3568895_ChIP_Ect_H3K27ac_rep2_Mus_musculus_ChIP-Seq_1_val_1_GRCm38_bowtie2.bam
+
+makeTagDirectory mMES_K27ac -genome ~/Packages/Homer/data/genomes/mm10 -fragLength 300 /bi/pubcache/TIDIED/Xiang_2019/ChIP-seq/PE/Aligned/SRR8454513_GSM3568898_ChIP_Mes_H3K27ac_rep1_Mus_musculus_ChIP-Seq_1_val_1_GRCm38_bowtie2.bam /bi/pubcache/TIDIED/Xiang_2019/ChIP-seq/PE/Aligned/SRR8454514_GSM3568898_ChIP_Mes_H3K27ac_rep1_Mus_musculus_ChIP-Seq_1_val_1_GRCm38_bowtie2.bam /bi/pubcache/TIDIED/Xiang_2019/ChIP-seq/PE/Aligned/SRR8454516_GSM3568898_ChIP_Mes_H3K27ac_rep1_Mus_musculus_ChIP-Seq_1_val_1_GRCm38_bowtie2.bam /bi/pubcache/TIDIED/Xiang_2019/ChIP-seq/PE/Aligned/SRR8454517_GSM3568899_ChIP_Mes_H3K27ac_rep2_Mus_musculus_ChIP-Seq_1_val_1_GRCm38_bowtie2.bam /bi/pubcache/TIDIED/Xiang_2019/ChIP-seq/PE/Aligned/SRR8454518_GSM3568899_ChIP_Mes_H3K27ac_rep2_Mus_musculus_ChIP-Seq_1_val_1_GRCm38_bowtie2.bam
+
+makeTagDirectory mEND_K27ac -genome ~/Packages/Homer/data/genomes/mm10 -fragLength 300 /bi/pubcache/TIDIED/Xiang_2019/ChIP-seq/PE/Aligned/SRR8454519_GSM3568900_ChIP_End_H3K27ac_rep1_Mus_musculus_ChIP-Seq_1_val_1_GRCm38_bowtie2.bam /bi/pubcache/TIDIED/Xiang_2019/ChIP-seq/PE/Aligned/SRR8454520_GSM3568901_ChIP_End_H3K27ac_rep2_Mus_musculus_ChIP-Seq_1_val_1_GRCm38_bowtie2.bam
+
+makeTagDirectory E11_liver_K27ac -genome ~/Packages/Homer/data/genomes/mm10 -fragLength 300 /bi/pubcache/TIDIED/ENCODE_2012/ENCFF001ZRB_ChIP-seq_liver_E11.5_H3K27ac-mouse_GRCm38_bowtie2.bam /bi/pubcache/TIDIED/ENCODE_2012/ENCFF001ZRL_ChIP-seq_liver_E11.5_H3K27ac-mouse_GRCm38_bowtie2.bam
+
+makeTagDirectory E11_heart_K27ac -genome ~/Packages/Homer/data/genomes/mm10 -fragLength 300 /bi/pubcache/TIDIED/ENCODE_2012/ENCFF001ZRG_ChIP-seq_heart_E11.5_H3K27ac-mouse_GRCm38_bowtie2.bam /bi/pubcache/TIDIED/ENCODE_2012/ENCFF001ZRE_ChIP-seq_heart_E11.5_H3K27ac-mouse_GRCm38_bowtie2.bam
+
+makeTagDirectory E11_forebrain_K27ac -genome ~/Packages/Homer/data/genomes/mm10 -fragLength 300 /bi/pubcache/TIDIED/ENCODE_2012/ENCFF001ZRF_ChIP-seq_forebrain_E11.5_H3K27ac-mouse_GRCm38_bowtie2.bam /bi/pubcache/TIDIED/ENCODE_2012/ENCFF001ZRD_ChIP-seq_forebrain_E11.5_H3K27ac-mouse_GRCm38_bowtie2.bam
+
+makeTagDirectory E11_midbrain_K27ac -genome ~/Packages/Homer/data/genomes/mm10 -fragLength 300 /bi/pubcache/TIDIED/ENCODE_2012/ENCFF001ZRQ_ChIP-seq_midbrain_E11.5_H3K27ac-mouse_GRCm38_bowtie2.bam /bi/pubcache/TIDIED/ENCODE_2012/ENCFF001ZRP_ChIP-seq_midbrain_E11.5_H3K27ac-mouse_GRCm38_bowtie2.bam
+
+makeTagDirectory E11_hindbrain_K27ac -genome ~/Packages/Homer/data/genomes/mm10 -fragLength 300 /bi/pubcache/TIDIED/ENCODE_2012/ENCFF001ZRK_ChIP-seq_hindbrain_E11.5_H3K27ac-mouse_GRCm38_bowtie2.bam /bi/pubcache/TIDIED/ENCODE_2012/ENCFF001ZRJ_ChIP-seq_hindbrain_E11.5_H3K27ac-mouse_GRCm38_bowtie2.bam
+
+

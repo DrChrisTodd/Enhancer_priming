@@ -1,0 +1,165 @@
+---
+title: "PCHiC_gene_calling"
+author: "ToddC"
+date: "28/04/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(root.dir="~/Enh_priming/")
+```
+
+
+```{r HiC_interactions, echo=F, message=FALSE, warning=FALSE}
+setwd("~/Enh_priming/")
+source("~/R/functions/bedtools_suite.R")
+
+get.baits.bed=function(df){
+  id=paste0(df[,1],":",df[,2],"-",df[,3])
+  out.df=data.frame(df[,1:3],id)
+  colnames(out.df)=c("chr","start","end","id")
+  return(out.df)
+}
+get.ends.bed=function(df){
+  id=unlist(lapply(df[,4], function(x){unlist(strsplit(as.character(x),","))[1]}))
+  chr=unlist(lapply(id, function(x){unlist(strsplit(x,":|-|,"))[1]}))
+  start=unlist(lapply(id, function(x){unlist(strsplit(x,":|-|,"))[2]}))
+  end=unlist(lapply(id, function(x){unlist(strsplit(x,":|-|,"))[3]}))
+  out.df=data.frame(chr,start,end,id)
+  colnames(out.df)=c("chr","start","end","id")
+  return(out.df)
+}
+get.score=function(df){
+  score=unlist(lapply(df[,4], function(x){unlist(strsplit(as.character(x),","))[2]}))
+  return(score)
+}
+make.bed.from.id=function(ids){
+  chr=unlist(lapply(ids, function(x){unlist(strsplit(x,":|-|,"))[1]}))
+  start=unlist(lapply(ids, function(x){unlist(strsplit(x,":|-|,"))[2]}))
+  end=unlist(lapply(ids, function(x){unlist(strsplit(x,":|-|,"))[3]}))
+  df=data.frame(chr,start,end,ids)
+  return(df)
+}
+format.hic.df=function(df){
+  bait.id=get.baits.bed(df)[,4]
+  ends.id=unlist(lapply(df[,4], function(x){unlist(strsplit(as.character(x),","))[1]}))
+  int.id=paste0(bait.id,":-:",ends.id)
+  score=get.score(df)
+  out.df=data.frame(bait.id,ends.id,int.id,score)
+  return(out.df)
+}
+adjust.bed.size=function(df,size){
+  new.df=df
+  mid=round((df[,3]+df[,2])/2)
+  flank=round(size/2)
+  starts=mid-flank
+  starts[starts<1]=1
+  ends=mid+flank
+  new.df[,2]=starts
+  new.df[,3]=ends
+  return(new.df)
+}
+####analysis of Hg38 data####
+HIC.ESC=read.delim("~/Enh_priming/Data/human/PCHiC/hESC12_merged_hg38_washU.txt",h=F)
+HIC.ESC=format.hic.df(HIC.ESC)
+HIC.NPC=read.delim("~/Enh_priming/Data/human/PCHiC/hNPC12_merged_hg38_washU.txt",h=F)
+HIC.NPC=format.hic.df(HIC.NPC)
+
+HIC.ESC[,1]=as.character(HIC.ESC[,1])
+HIC.ESC[,2]=as.character(HIC.ESC[,2])
+HIC.NPC[,1]=as.character(HIC.NPC[,1])
+HIC.NPC[,2]=as.character(HIC.NPC[,2])
+
+##Getting all the unique HiC fragments across the datasets##
+
+fragments=c(HIC.ESC[,1],HIC.ESC[,2],HIC.NPC[,1],HIC.NPC[,2])
+fragments=unique(fragments)
+
+
+fragments.bed=make.bed.from.id(fragments)
+
+##Generating lookup dataframes for the TSSs and Enhancers within the HiC fragments##
+
+TSS=adjust.bed.size(read.delim("~/Enh_priming/Annotations/Human/ENSEMBL_all_TSS.txt")[,1:4],200)
+
+#finding all interacting partners for each gene
+
+prom.frags=unique(intersectBed(fragments.bed,TSS,opt.string = " -wa -wb")[,c(4,8)])
+colnames(prom.frags)=c("prom.frag","Gene.ID")
+
+enhs=unique(read.delim("~/Enh_priming/Annotations/Human/Enhancers/Comb_lineage_enh_v2.txt",h=F)[,1:4])
+enh.frags=unique(intersectBed(fragments.bed,enhs,opt.string = "-wa -wb")[,c(4,8)])
+colnames(enh.frags)=c("enh.frag","Enh.ID")
+
+get.hic.genes=function(input.hic){
+
+score.lookup=input.hic[,c("int.id","score")]
+for.ori=input.hic[,c(1:2,3)]
+colnames(for.ori)=c("enh.frag","prom.frag","int.id")
+for.ori=merge(for.ori,enh.frags,by="enh.frag")
+for.ori=merge(for.ori,prom.frags,by="prom.frag")
+rev.ori=input.hic[,c(2,1,3)]
+colnames(rev.ori)=c("enh.frag","prom.frag","int.id")
+rev.ori=merge(rev.ori,enh.frags,by="enh.frag")
+rev.ori=merge(rev.ori,prom.frags,by="prom.frag")
+tog.hic=unique(rbind(for.ori,rev.ori)[,c(4,5,3)])
+tog.hic=merge(tog.hic,score.lookup,by="int.id")
+gene.info=unique(tog.hic[,c("Enh.ID","Gene.ID")])
+return(gene.info)}
+
+write.table(get.hic.genes(HIC.NPC),"~/Enh_priming/Annotations/Human/HiC_genes/hNEC_HiC_genes.txt",sep="\t",col.names = F,row.names = F,quote = F)
+write.table(get.hic.genes(HIC.ESC),"~/Enh_priming/Annotations/Human/HiC_genes/hESC_HiC_genes.txt",sep="\t",col.names = F,row.names = F,quote = F)
+
+
+```
+
+
+
+```{r proximial_gene_models,echo=FALSE}
+source("~/R/functions/bedtools_suite.R")
+get.prox.genes=function(ids,input.bed=enh.bed,cutoff=20000,gene.coord=coding.tss){
+  input.bed=input.bed[input.bed[,4]%in%ids,]
+  prox.genes=closestBed(sortBed(input.bed),gene.coord)
+  num.cols=ncol(prox.genes)
+  prox.genes=prox.genes[prox.genes[,num.cols]<cutoff,]
+  n.col.tss=ncol(gene.coord)
+  n.col.enh=ncol(enh.bed)
+  col.adj=c(n.col.enh,n.col.enh+n.col.tss)
+  ids=prox.genes[,col.adj]
+  return(ids)
+}
+get.all.prox.genes=function(ids,input.bed=enh.bed,cutoff=20000,gene.coord=coding.tss){
+  input.bed=input.bed[input.bed[,4]%in%ids,]
+  prox.genes=windowBed(sortBed(input.bed),gene.coord,opt.string = paste0("-w ",cutoff))
+  num.cols=ncol(prox.genes)
+  n.col.tss=ncol(gene.coord)
+  n.col.enh=ncol(enh.bed)
+  col.adj=c(n.col.enh,n.col.enh+n.col.tss)
+  ids=prox.genes[,col.adj]
+  return(ids)
+}
+
+####Human####
+enh.bed=read.delim("~/Enh_priming/Annotations/Human/Enhancers/Comb_lineage_enh_v2.txt",h=F)
+coding.tss=sortBed(check.chr.col(read.delim("~/Enh_priming/Annotations/Human/ENSEMBL_coding_gene_TSS.txt",h=F)))
+enh.lookup=read.delim("~/Enh_priming/Annotations/Human/Comb_Enh_class_lookup_v2.txt",h=F)
+enh.classes=unique(enh.lookup[,2])
+
+enh.prox.genes=get.prox.genes(enh.bed[,4])
+enh.window.genes=get.all.prox.genes(enh.bed[,4])
+write.table(enh.prox.genes,"~/Enh_priming/Annotations/Human/Prox_genes/Nearest_gene_20kb.txt",sep="\t",col.names = F,row.names = F,quote = F)
+write.table(enh.window.genes,"~/Enh_priming/Annotations/Human/Prox_genes/Proximal_gene_20kb.txt",sep="\t",col.names = F,row.names = F,quote = F)
+
+
+####Mouse####
+enh.bed=read.delim("~/Enh_priming/Annotations/Mouse/Enhancers/Comb_lineage_enhancers.txt",h=F)
+coding.tss=sortBed(check.chr.col(read.delim("~/Enh_priming/Annotations/Mouse/mm10_ENSEMBL_coding_gene_TSS.bed",h=F)))
+enh.prox.genes=get.prox.genes(enh.bed[,4])
+enh.window.genes=get.all.prox.genes(enh.bed[,4])
+write.table(enh.prox.genes,"~/Enh_priming/Annotations/Mouse/Prox_genes/Nearest_gene_20kb.txt",sep="\t",col.names = F,row.names = F,quote = F)
+write.table(enh.window.genes,"~/Enh_priming/Annotations/Mouse/Prox_genes/Proximal_gene_20kb.txt",sep="\t",col.names = F,row.names = F,quote = F)
+
+
+
+```

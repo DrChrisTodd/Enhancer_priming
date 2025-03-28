@@ -1,0 +1,652 @@
+---
+title: "ChIP-seq_and_ATAC_analysis"
+author: "ToddC"
+date: "27/04/2023"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(root.dir="~/Enh_priming/")
+
+##Set path to homer
+homer = '/bi/apps/homer/4.11/bin/'
+
+adjust.bed.size=function(df,size){
+  new.df=df
+  mid=round((df[,3]+df[,2])/2)
+  flank=round(size/2)
+  starts=mid-flank
+  starts[starts<1]=1
+  ends=mid+flank
+  new.df[,2]=starts
+  new.df[,3]=ends
+  return(new.df)
+}
+```
+
+Using Homer tools to analyse ChIP-seq and ATAC-seq libraries at enhancer sites of interest. 
+
+Tag directories for each data-set was generated using homer's maketagdirectory function in bash.
+
+For plotting heatmaps of signal-intesity over enhancer regions histograms of signal across each enhancer normalised to the library was performed using homertools annotatepeaks function through R passing commands to bash. 
+
+```{r homer_annotate_peaks, echo=F, message=FALSE, warning=FALSE}
+
+annotatepeaks <- function(bed.file,tag,ref.genome,path.to.homer='') {
+  out = tempfile()
+  
+  command = paste('perl ',path.to.homer,'annotatePeaks.pl ',bed.file,' ',ref.genome, '-size given -hist 100 -ghist -d ',tag,' > ',out,sep='')
+  cat(command,'\n')
+  try(system(command))
+  res = read.table(out,header=T,as.is=T)
+  
+  unlink(out)
+  return(res)
+}
+
+##set working directory
+setwd('~/Enh_priming/Homer/Homer_tag_dir/')
+
+####Human####
+##set directories for homerTag directories
+
+tag.dir = '~/Enh_priming/Homer/Homer_tag_dir/human/'
+tag.list =c("H1_K27ac","H1_K4me1","H1_K27me3","NPC_K27ac","NPC_K4me1","ME_K27ac","ME_K4me1","MSC_K27ac","MSC_K4me1")
+
+##Set bed file for heatmaps
+bed.file = '~/Enh_priming/Annotations/Human/Enhancers/Comb_lineage_enh.txt'
+
+#set out directory
+outdir='~/Enh_priming/Homer/Homer_hist/'
+###Annotate Peaks function from Homer Package
+temp.bed.file<-tempfile()
+bed<-unique(read.delim(bed.file,h=F)[,1:4])
+bed[,1]=gsub("chr","",bed[,1])
+bed=adjust.bed.size(bed,6000)
+bed[,5]=rep(1)
+bed[,6]=rep("+")
+
+write.table(bed,file=temp.bed.file,quote=F,sep='\t',col.names=F,row.names=F)
+
+for(i in 1:length(tag.list)){
+  full.tag.dir<-paste(tag.dir,tag.list[i],sep="")
+  tag.hist<-annotatepeaks(bed.file = temp.bed.file,tag=full.tag.dir,ref.genome = ' hg38 ',path.to.homer = homer)
+  write.table(tag.hist,paste(outdir,tag.list[i],"_hist.txt",sep=""),sep="\t",quote=F,row.names = F,col.names = T)
+}
+unlink(temp.bed.file)
+####Mouse####
+##set directories for homerTag directories
+
+tag.dir = '~/Enh_priming/Homer/Homer_tag_dir/mouse/'
+tag.list =c("Aled_2i_H3K27ac","Aled_2i_H3K27me3","Aled_2i_H3K4me1",
+            "Aled_EpiLC_H3K27ac","Aled_EpiLC_H3K27me3","Aled_EpiLC_H3K4me1",
+            "mMES_K27ac","mEND_K27ac","mECT_K27ac",
+            "E11_liver_K27ac","E11_midbrain_K27ac","E11_heart_K27ac","E11_forebrain_K27ac","E11_hindbrain_K27ac")
+##Set bed file for heatmaps
+bed.file = '~/Enh_priming/Annotations/Mouse/Comb_lineage_enhancers.txt'
+
+#set out directory
+outdir='~/Enh_priming/Homer/Homer_hist/mouse/'
+###Annotate Peaks function from Homer Package
+temp.bed.file<-tempfile()
+bed<-unique(read.delim(bed.file,h=F)[,1:4])
+bed[,1]=gsub("chr","",bed[,1])
+bed=adjust.bed.size(bed,6000)
+bed[,5]=rep(1)
+bed[,6]=rep("+")
+#write.table(bed,"../Comb_mouse_enh_6kb.txt",quote=F,sep='\t',col.names=F,row.names=F)
+write.table(bed,file=temp.bed.file,quote=F,sep='\t',col.names=F,row.names=F)
+
+for(i in 1:length(tag.list)){
+  full.tag.dir<-paste(tag.dir,tag.list[i],sep="")
+  tag.hist<-annotatepeaks(bed.file = temp.bed.file,tag=full.tag.dir,ref.genome = ' mm10 ',path.to.homer = homer)
+  write.table(tag.hist,paste(outdir,tag.list[i],"_hist.txt",sep=""),sep="\t",quote=F,row.names = F,col.names = T)
+}
+unlink(temp.bed.file)
+
+
+```
+
+```{r Plotting_ChIP_signal_heatmaps, echo=F}
+setwd("E:/Headstone/Enh_priming/")
+
+library(ComplexHeatmap)
+library(circlize)
+library("progress")
+library(ggplot2)
+
+lookup=read.delim("./Annotations/Human/Comb_Enh_class_lookup_v2.txt",h=F)
+colnames(lookup)=c("ID","class")
+lookup=lookup[!is.na(lookup$ID),]
+classes=unique(lookup$class)
+
+hist.dir="./Homer/Homer_hist/human/"
+hist.files=list.files(hist.dir)
+
+hist.files
+colour.list=c("H1_K27ac"="green4",
+              "H1_K27me3"="green4",
+              "H1_K4me1"="green4",
+              "ME_K27ac"="blue",
+              "ME_K4me1"="blue",
+              "MSC_K27ac"="red",
+              "MSC_K4me1"="red",
+              "NPC_K27ac"="purple4",
+              "NPC_K4me1"="purple4")
+
+hist.list=c("H1_K27ac"="H1_K27ac_hist.txt",
+      "H1_K27me3"="H1_K27me3_hist.txt",
+      "H1_K4me1"="H1_K4me1_hist.txt",
+      "ME_K27ac"="ME_K27ac_hist.txt",
+      "ME_K4me1"="ME_K4me1_hist.txt",
+      "MSC_K27ac"="MSC_K27ac_hist.txt",
+      "MSC_K4me1"="MSC_K4me1_hist.txt",
+      "NPC_K27ac"="NPC_K27ac_hist.txt",
+      "NPC_K4me1"="NPC_K4me1_hist.txt")
+
+
+
+
+ref.hist.file=hist.files[grepl("H1_K4me1",hist.files)]
+ref.hist=read.delim(paste0(hist.dir,ref.hist.file))
+ref.mat=as.matrix(ref.hist[,2:ncol(ref.hist)])
+row.names(ref.mat)=ref.hist[,1]
+not.in.ref=unique(as.character(lookup$ID[lookup$ID%in%rownames(ref.mat)==F]))
+not.in.ref.mat=matrix(0,nrow=length(not.in.ref),ncol = ncol(ref.mat))
+row.names(not.in.ref.mat)=not.in.ref
+ref.mat=rbind(ref.mat,not.in.ref.mat)
+ref.mat=ref.mat[order(rowSums(ref.mat[,40:60]),decreasing = T),]
+ref.ids=rownames(ref.mat)
+rm(ref.mat,ref.hist,not.in.ref.mat,ref.hist.file,not.in.ref)
+
+
+
+saturation.list=c("H1_K27ac"=0.08,
+                  "H1_K27me3"=0.1,
+                  "H1_K4me1"=0.08,
+                  "ME_K27ac"=0.08,
+                  "ME_K4me1"=0.08,
+                  "MSC_K27ac"=0.08,
+                  "MSC_K4me1"=0.08,
+                  "NPC_K27ac"=0.08,
+                  "NPC_K4me1"=0.08)
+
+pb <- progress_bar$new(
+  format = "  Getting heatmaps [:bar] :percent eta: :eta",
+  total = (length(classes)*length(hist.files)), clear = FALSE, width= 60)
+
+
+
+
+for(i in names(hist.list)){
+  hist=read.delim(paste0(hist.dir,hist.list[i]))
+  mat=as.matrix(hist[,2:ncol(hist)])
+  row.names(mat)=hist[,1]
+  not.in.hist=unique(as.character(lookup$ID[lookup$ID%in%rownames(mat)==F]))
+  not.mat=matrix(0,ncol = ncol(mat),nrow=length(not.in.hist))
+  row.names(not.mat)=not.in.hist
+  mat=rbind(mat,not.mat)
+  mat=mat[ref.ids,]
+  col.ramp=colorRamp2(c(min(mat),saturation.list[i]),c("white",colour.list[i]))
+  col.ramp2=colorRamp2(c(min(mat),saturation.list[i]),c("blue","red"))
+  for(n in classes){
+    ids=lookup$ID[lookup$class==n]
+    mat2=mat[rownames(mat)%in%ids,]
+    hm.plot=Heatmap(mat2,cluster_rows=F,cluster_columns=F,
+                    show_row_names=F,show_column_names=F,
+                    show_heatmap_legend=F,col=col.ramp,use_raster = T)
+    hm.plot2=Heatmap(mat2,cluster_rows=F,cluster_columns=F,
+                     show_row_names=F,show_column_names=F,
+                     show_heatmap_legend=F,col=col.ramp2,use_raster = T)
+    output.name=paste0("./Plots/Heatmaps/human/",i,"_",n,".jpg")
+    jpeg(output.name,w=1.5,h=5,units='in',res=600)
+    draw(hm.plot)
+    dev.off()
+    output.name=paste0("./Plots/Heatmaps/human/RB/",i,"_",n,".jpg")
+    jpeg(output.name,w=1.5,h=5,units='in',res=600)
+    draw(hm.plot2)
+    dev.off()
+    pb$tick()
+  }
+}
+
+
+int.classes=c( "NPC_specific" , "NPC_specific","NEC_specific","MSC_specific",
+               "7W_brain_specific","Fetal_adrenal_specific","Fetal_kidney_specific",
+               "Fetal_lung_specific", "Fetal_stomach_specific","Fetal_ventricle_specific")
+
+pb <- progress_bar$new(
+  format = "  Getting heatmaps [:bar] :percent eta: :eta",
+  total = (length(int.classes)*length(hist.files)), clear = FALSE, width= 60)
+
+
+for(i in names(hist.list)){
+  hist=read.delim(paste0(hist.dir,hist.list[i]))
+  mat=as.matrix(hist[,2:ncol(hist)])
+  row.names(mat)=hist[,1]
+  not.in.hist=unique(as.character(lookup$ID[lookup$ID%in%rownames(mat)==F]))
+  not.mat=matrix(0,ncol = ncol(mat),nrow=length(not.in.hist))
+  row.names(not.mat)=not.in.hist
+  mat=rbind(mat,not.mat)
+  mat=mat[ref.ids,]
+  col.ramp=colorRamp2(c(min(mat),saturation.list[i]),c("white",colour.list[i]))
+  col.ramp2=colorRamp2(c(min(mat),saturation.list[i]),c("blue","red"))
+  for(n in int.classes){
+    class.ids=lookup[lookup$class==n,1]
+    prim.ids=lookup[lookup$class==gsub("_specific","_prim",n),1]
+    nonprim.ids=lookup[lookup$class==gsub("_specific","_nonprim",n),1]
+    int.ids=class.ids[!class.ids%in%c(prim.ids,nonprim.ids)]
+    mat2=mat[rownames(mat)%in%int.ids,]
+    hm.plot=Heatmap(mat2,cluster_rows=F,cluster_columns=F,
+                    show_row_names=F,show_column_names=F,
+                    show_heatmap_legend=F,col=col.ramp,use_raster = T)
+    hm.plot2=Heatmap(mat2,cluster_rows=F,cluster_columns=F,
+                     show_row_names=F,show_column_names=F,
+                     show_heatmap_legend=F,col=col.ramp2,use_raster = T)
+    output.name=paste0("./Plots/Heatmaps/human/",i,"_",gsub("_specific","_int",n),".jpg")
+    jpeg(output.name,w=1.5,h=5,units='in',res=600)
+    draw(hm.plot)
+    dev.off()
+    output.name=paste0("./Plots/Heatmaps/human/RB/",i,"_",gsub("_specific","_int",n),".jpg")
+    jpeg(output.name,w=1.5,h=5,units='in',res=600)
+    draw(hm.plot2)
+    dev.off()
+    pb$tick()
+  }
+}
+
+
+```
+
+
+Using homer tools annotate peaks function to generate trend lines of the signal of ATAC libraries averaged across the enhancer groups.
+
+```{r homer_annotate_peaks_trend_lines, echo=F, message=F,warning=F}
+adjust.bed.size=function(df,size){
+  new.df=df
+  mid=round((df[,3]+df[,2])/2)
+  flank=round(size/2)
+  starts=mid-flank
+  starts[starts<1]=1
+  ends=mid+flank
+  new.df[,2]=starts
+  new.df[,3]=ends
+  return(new.df)
+}
+annotatepeaks.trend <- function(bed.file,tag,ref.genome,path.to.homer='',tag.names) {
+  out = tempfile()
+  
+  command = paste('perl ',path.to.homer,'annotatePeaks.pl ',bed.file,' ',ref.genome, '-size ',size, ' -hist 50 -d ',tag,' > ',out,sep='')
+  cat(command,'\n')
+  try(system(command))
+  res = read.table(out,header=F,as.is=T,skip = 1,sep = "\t")
+  res=res[,c(1,seq(2,ncol(res),3))]
+  colnames(res)=c("Distance",tag.names)
+  unlink(out)
+  return(res)
+}
+##Set path to homer
+homer = '/bi/apps/homer/4.11/bin/'
+
+####Human####
+##set directories for homerTag directories
+size=4000
+tag.dir = '~/Enh_priming/Homer/Homer_tag_dir/human/'
+tag.list =c("Naive_hESC_ATAC","Primed_hESC_ATAC")
+#set out directory
+outdir='~/Enh_priming/Homer/Homer_trend_plots/human/'
+
+#Class lookup
+lookup=read.delim("~/Enh_priming/Annotations/Human/Comb_Enh_class_lookup.txt",h=F)
+enh.classes=unique(lookup[,2])
+enh.bed=unique(read.delim("~/Enh_priming/Annotations/Human/Enhancers/Comb_lineage_enh.txt",h=F)[,1:4])
+
+for(i in 1:length(enh.classes)){
+class.name=enh.classes[i]
+print(class.name)
+ids=lookup[lookup[,2]==enh.classes[i],1]
+###Annotate Peaks function from Homer Package
+temp.bed.file<-tempfile()
+bed<-enh.bed[enh.bed[,4]%in%ids,]
+bed[,1]=gsub("chr","",bed[,1])
+bed=adjust.bed.size(bed,size)
+bed[,5]=rep(1)
+bed[,6]=rep("+")
+write.table(bed,file=temp.bed.file,quote=F,sep='\t',col.names=F,row.names=F)
+#write.table(bed,file="~/test.bed",quote=F,sep='\t',col.names=F,row.names=F)
+
+tag.hist<-annotatepeaks.trend(bed.file = temp.bed.file,tag=paste(paste0(tag.dir,tag.list),collapse = " "),ref.genome = ' hg38 ',path.to.homer = homer,tag.names = tag.list)
+write.table(tag.hist,paste(outdir,class.name,"_trends.txt",sep=""),sep="\t",quote=F,row.names = F,col.names = T)
+unlink(temp.bed.file)
+}
+
+#Global control
+control.peaks="~/Enh_priming/Annotations/Human/Human_global_probes_4kb.bed"
+tag.hist<-annotatepeaks.trend(bed.file = control.peaks,tag=paste(paste0(tag.dir,tag.list),collapse = " "),ref.genome = ' hg38 ',path.to.homer = homer,tag.names = tag.list)
+write.table(tag.hist,paste(outdir,"Global","_trends.txt",sep=""),sep="\t",quote=F,row.names = F,col.names = T)
+
+
+
+####Mouse####
+##set directories for homerTag directories
+size=4000
+tag.dir = '~/Enh_priming/Homer/Homer_tag_dir/mouse/'
+tag.list =c("ESC_2i_ATAC","ESC_ATAC","ESC_Serum_ATAC")
+#set out directory
+outdir='~/Enh_priming/Homer/Homer_trend_plots/mouse/'
+
+#Class lookup
+lookup=read.delim("~/Enh_priming/Annotations/Mouse/Comb_Enh_class_lookup.txt",h=F)
+enh.classes=unique(lookup[,2])
+enh.bed=unique(read.delim("~/Enh_priming/Annotations/Mouse/Enhancers/Comb_lineage_enhancers.txt",h=F)[,1:4])
+
+for(i in 1:length(enh.classes)){
+class.name=enh.classes[i]
+print(class.name)
+ids=lookup[lookup[,2]==enh.classes[i],1]
+###Annotate Peaks function from Homer Package
+temp.bed.file<-tempfile()
+bed<-enh.bed[enh.bed[,4]%in%ids,]
+bed[,1]=gsub("chr","",bed[,1])
+bed=adjust.bed.size(bed,size)
+bed[,5]=rep(1)
+bed[,6]=rep("+")
+write.table(bed,file=temp.bed.file,quote=F,sep='\t',col.names=F,row.names=F)
+#write.table(bed,file="~/test.bed",quote=F,sep='\t',col.names=F,row.names=F)
+
+tag.hist<-annotatepeaks.trend(bed.file = temp.bed.file,tag=paste(paste0(tag.dir,tag.list),collapse = " "),ref.genome = ' mm10 ',path.to.homer = homer,tag.names = tag.list)
+write.table(tag.hist,paste(outdir,class.name,"_trends.txt",sep=""),sep="\t",quote=F,row.names = F,col.names = T)
+unlink(temp.bed.file)
+}
+
+#Global control
+control.peaks="~/Enh_priming/Annotations/Mouse/Mouse_global_probes_4kb.bed"
+tag.hist<-annotatepeaks.trend(bed.file = control.peaks,tag=paste(paste0(tag.dir,tag.list),collapse = " "),ref.genome = ' mm10 ',path.to.homer = homer,tag.names = tag.list)
+write.table(tag.hist,paste(outdir,"Global","_trends.txt",sep=""),sep="\t",quote=F,row.names = F,col.names = T)
+
+
+
+
+```
+
+```{r plotting_trend_plots, echo=FALSE}
+####Human####
+
+#plotting
+library(ggplot2)
+library(tidyverse)
+outdir="~/Enh_priming/Homer/Homer_trend_plots/human/"
+
+trend.files=list.files(outdir)
+trend.files=trend.files[!grepl("Global",trend.files)]
+
+global.levels=read.delim(paste0(outdir,"Global_trends.txt"))
+for(i in 2:ncol(global.levels)){
+  global.levels[,i]=rep(mean(global.levels[,i]))
+}
+global.long=pivot_longer(global.levels,cols=-1,names_to="Tissue",values_to="signal")
+global.long$type=rep("Global")
+
+tags=colnames(global.levels)[-1]
+control.df=data.frame(tags,means=colMeans(global.levels[,-1]))
+
+
+pdf("~/Enh_priming/Homer/Homer_trend_plots/Human_trend_plots.pdf")
+for(n in 1:(length(trend.files))){
+tag.name=gsub("_trends.txt","",trend.files[n])
+df=read.delim(paste0(outdir,trend.files[n]))
+df.long=pivot_longer(df,cols=-1,names_to="Tissue",values_to="signal")
+df.long$Tissue=factor(df.long$Tissue,levels=control.df$tags)
+df.long$type=rep("Enh")
+df.long=rbind(global.long,df.long)
+df.long$type=factor(df.long$type,levels=c("Enh","Global"))
+gg=ggplot(df.long,aes(x=Distance,y=signal,color=Tissue))+geom_line(aes(linetype=type))+theme_minimal()+ggtitle(label=tag.name)
+print(gg)
+}
+dev.off()
+
+
+#getting max and min values
+max.vals=c()
+min.vals=c()
+for(i in 1:length(trend.files)){
+df=read.delim(paste0(outdir,trend.files[i]))
+df.long=pivot_longer(df,cols=-1,names_to="Tissue",values_to="signal")
+df.long$Tissue=factor(df.long$Tissue,levels=control.df$tags)
+max.vals[i]=max(df.long[,3])
+min.vals[i]=min(df.long[,3])
+}
+plot.min=round(min(min.vals)*0.8,digits = 2)
+plot.min=0
+plot.max=round(max(max.vals)*1.2,digits = 1)
+
+
+pdf("~/Enh_priming/Homer/Homer_trend_plots/Human_trend_plots_common_axis.pdf")
+for(n in 1:(length(trend.files))){
+tag.name=gsub("_trends.txt","",trend.files[n])
+df=read.delim(paste0(outdir,trend.files[n]))
+df.long=pivot_longer(df,cols=-1,names_to="Tissue",values_to="signal")
+df.long$Tissue=factor(df.long$Tissue,levels=control.df$tags)
+df.long$type=rep("Enh")
+df.long=rbind(global.long,df.long)
+df.long$type=factor(df.long$type,levels=c("Enh","Global"))
+gg=ggplot(df.long,aes(x=Distance,y=signal,color=Tissue))+geom_line(aes(linetype=type))+theme_minimal()+ggtitle(label=tag.name)+ylim(c(plot.min,plot.max))
+print(gg)
+}
+dev.off()
+####Mouse####
+
+#plotting
+library(ggplot2)
+library(tidyverse)
+outdir="~/Enh_priming/Homer/Homer_trend_plots/mouse/"
+
+trend.files=list.files(outdir)
+trend.files=trend.files[!grepl("Global",trend.files)]
+
+global.levels=read.delim(paste0(outdir,"Global_trends.txt"))
+for(i in 2:ncol(global.levels)){
+  global.levels[,i]=rep(mean(global.levels[,i]))
+}
+global.long=pivot_longer(global.levels,cols=-1,names_to="Tissue",values_to="signal")
+global.long$type=rep("Global")
+
+tags=colnames(global.levels)[-1]
+control.df=data.frame(tags,means=colMeans(global.levels[,-1]))
+
+
+
+pdf("~/Enh_priming/Homer/Homer_trend_plots/Mouse_trend_plots.pdf")
+for(n in 1:(length(trend.files))){
+  tag.name=gsub("_trends.txt","",trend.files[n])
+  df=read.delim(paste0(outdir,trend.files[n]))
+  df.long=pivot_longer(df,cols=-1,names_to="Tissue",values_to="signal")
+  df.long$Tissue=factor(df.long$Tissue,levels=control.df$tags)
+  df.long$type=rep("Enh")
+  df.long=rbind(global.long,df.long)
+  df.long$type=factor(df.long$type,levels=c("Enh","Global"))
+  gg=ggplot(df.long,aes(x=Distance,y=signal,color=Tissue))+geom_line(aes(linetype=type))+theme_minimal()+ggtitle(label=tag.name)
+  print(gg)
+}
+dev.off()
+
+
+
+#getting max and min values
+max.vals=c()
+min.vals=c()
+for(i in 1:length(trend.files)){
+df=read.delim(paste0(outdir,trend.files[i]))
+df.long=pivot_longer(df,cols=-1,names_to="Tissue",values_to="signal")
+df.long$Tissue=factor(df.long$Tissue,levels=control.df$tags)
+max.vals[i]=max(df.long[,3])
+min.vals[i]=min(df.long[,3])
+}
+plot.min=round(min(min.vals)*0.8,digits = 2)
+plot.min=0
+plot.max=round(max(max.vals)*1.2,digits = 1)
+
+
+pdf("~/Enh_priming/Homer/Homer_trend_plots/Mouse_trend_plots_common_axis.pdf")
+for(n in 1:(length(trend.files))){
+tag.name=gsub("_trends.txt","",trend.files[n])
+df=read.delim(paste0(outdir,trend.files[n]))
+df.long=pivot_longer(df,cols=-1,names_to="Tissue",values_to="signal")
+df.long$Tissue=factor(df.long$Tissue,levels=control.df$tags)
+df.long$type=rep("Enh")
+df.long=rbind(global.long,df.long)
+df.long$type=factor(df.long$type,levels=c("Enh","Global"))
+gg=ggplot(df.long,aes(x=Distance,y=signal,color=Tissue))+geom_line(aes(linetype=type))+theme_minimal()+ggtitle(label=tag.name)+ylim(c(plot.min,plot.max))
+print(gg)
+}
+dev.off()
+
+```
+
+
+```{r plotting_mouse_heatmaps, echo=FALSE}
+
+setwd("~/Enh_priming/")
+
+library(ComplexHeatmap)
+library(circlize)
+library("progress")
+library(ggplot2)
+
+lookup=read.delim("~/Enh_priming/Annotations/Mouse/Comb_Enh_class_lookup.txt",h=F)
+colnames(lookup)=c("ID","class")
+lookup=lookup[!is.na(lookup$ID),]
+classes=unique(lookup$class)
+
+hist.dir="~/Enh_priming/Homer/Homer_hist/mouse/"
+hist.files=list.files(hist.dir)
+
+
+colour.list=c(
+  "Aled_2i_H3K27ac"="green4",  "Aled_2i_H3K27me3"="green4",  "Aled_2i_H3K4me1"="green4",
+  "Aled_EpiLC_H3K27ac"="green4",  "Aled_EpiLC_H3K27me3"="green4",  "Aled_EpiLC_H3K4me1"="green4",
+  "E11_forebrian_H3K27ac"="black",
+  "E11_heart_H3K27ac"="black",
+  "E11_hindbrain_H3K27ac"="black",
+  "E11_liver_H3K27ac"="black",
+  "E11_midbrain_H3K27ac"="black",
+  "mECT_H3K27ac"="purple4",  "mEND_H3K27ac"="blue",  "mMES_H3K27ac"="red"
+)
+hist.list=c(
+  "Aled_2i_H3K27ac"="Aled_2i_H3K27ac_hist.txt",  "Aled_2i_H3K27me3"="Aled_2i_H3K27me3_hist.txt",  "Aled_2i_H3K4me1"="Aled_2i_H3K4me1_hist.txt",
+  "Aled_EpiLC_H3K27ac"="Aled_EpiLC_H3K27ac_hist.txt",  "Aled_EpiLC_H3K27me3"="Aled_EpiLC_H3K27me3_hist.txt",   "Aled_EpiLC_H3K4me1"="Aled_EpiLC_H3K4me1_hist.txt",
+  "E11_forebrian_H3K27ac"="E11_forebrain_K27ac_hist.txt",
+  "E11_heart_H3K27ac"="E11_heart_K27ac_hist.txt",
+  "E11_hindbrain_H3K27ac"="E11_hindbrain_K27ac_hist.txt",
+  "E11_liver_H3K27ac"="E11_liver_K27ac_hist.txt",
+  "E11_midbrain_H3K27ac"="E11_midbrain_K27ac_hist.txt",
+  "mECT_H3K27ac"="mECT_K27ac_hist.txt",  "mEND_H3K27ac"="mEND_K27ac_hist.txt",  "mMES_H3K27ac"="mMES_K27ac_hist.txt"
+)
+
+
+
+ref.hist.file=hist.files[grepl("2i_H3K4me1",hist.files)]
+ref.hist=read.delim(paste0(hist.dir,ref.hist.file))
+ref.mat=as.matrix(ref.hist[,2:ncol(ref.hist)])
+row.names(ref.mat)=ref.hist[,1]
+not.in.ref=unique(as.character(lookup$ID[lookup$ID%in%rownames(ref.mat)==F]))
+not.in.ref.mat=matrix(0,nrow=length(not.in.ref),ncol = ncol(ref.mat))
+row.names(not.in.ref.mat)=not.in.ref
+ref.mat=rbind(ref.mat,not.in.ref.mat)
+ref.mat=ref.mat[order(rowSums(ref.mat[,40:60]),decreasing = T),]
+ref.ids=rownames(ref.mat)
+rm(ref.mat,ref.hist,not.in.ref.mat,ref.hist.file,not.in.ref)
+
+
+get.heatmap=function(ids,mark,to.ref=T){
+  hist=read.delim(paste0(hist.dir,hist.list[mark]))
+  mat=as.matrix(hist[,2:ncol(hist)])
+  row.names(mat)=hist[,1]
+  not.in.hist=unique(as.character(lookup$ID[lookup$ID%in%rownames(mat)==F]))
+  not.mat=matrix(0,ncol = ncol(mat),nrow=length(not.in.hist))
+  row.names(not.mat)=not.in.hist
+  mat=rbind(mat,not.mat)
+  if(to.ref){
+    mat=mat[ref.ids,]
+  }else{
+    mat=mat[order(rowSums(mat[,40:60]),decreasing=T),]
+  }
+
+  col.ramp=colorRamp2(c(min(mat),saturation.list[mark]),c("white",colour.list[mark]))
+    mat=mat[rownames(mat)%in%ids,]
+  hm.plot=Heatmap(mat,cluster_rows=F,cluster_columns=F,
+                     show_row_names=F,show_column_names=F,
+                  show_heatmap_legend=F,col=col.ramp,use_raster = T)
+  return(hm.plot)
+  }
+sat.test.heatmap=function(ids,mark,sat,to.ref=T){
+  hist=read.delim(paste0(hist.dir,hist.list[mark]))
+  mat=as.matrix(hist[,2:ncol(hist)])
+  row.names(mat)=hist[,1]
+  not.in.hist=unique(as.character(lookup$ID[lookup$ID%in%rownames(mat)==F]))
+  not.mat=matrix(0,ncol = ncol(mat),nrow=length(not.in.hist))
+  row.names(not.mat)=not.in.hist
+  mat=rbind(mat,not.mat)
+  if(to.ref){
+    mat=mat[ref.ids,]
+  }else{
+    mat=mat[order(rowSums(mat[,40:60]),decreasing=T),]
+  }
+
+  col.ramp=colorRamp2(c(min(mat),sat),c("white",colour.list[mark]))
+    mat=mat[rownames(mat)%in%ids,]
+  hm.plot=Heatmap(mat,cluster_rows=F,cluster_columns=F,
+                     show_row_names=F,show_column_names=F,
+                  show_heatmap_legend=F,col=col.ramp,use_raster = T)
+  return(hm.plot)
+  }
+saturation.list=c(
+  "Aled_2i_H3K27ac"=0.08,  "Aled_2i_H3K27me3"=0.08,  "Aled_2i_H3K4me1"=0.07,
+  "Aled_EpiLC_H3K27ac"=0.08,  "Aled_EpiLC_H3K27me3"=0.08,  "Aled_EpiLC_H3K4me1"=0.07,
+  "E11_forebrian_H3K27ac"=0.1,
+  "E11_heart_H3K27ac"=0.1,
+  "E11_hindbrain_H3K27ac"=0.1,
+  "E11_liver_H3K27ac"=0.1,
+  "E11_midbrain_H3K27ac"=0.1,
+  "mECT_H3K27ac"=0.1,  "mEND_H3K27ac"=0.1,  "mMES_H3K27ac"=0.1)
+
+pb <- progress_bar$new(
+  format = "  Getting heatmaps [:bar] :percent eta: :eta",
+  total = (length(classes)*length(hist.files)), clear = FALSE, width= 60)
+
+for(i in names(hist.list)){
+  hist=read.delim(paste0(hist.dir,hist.list[i]))
+  mat=as.matrix(hist[,2:ncol(hist)])
+  row.names(mat)=hist[,1]
+  not.in.hist=unique(as.character(lookup$ID[lookup$ID%in%rownames(mat)==F]))
+  not.mat=matrix(0,ncol = ncol(mat),nrow=length(not.in.hist))
+  row.names(not.mat)=not.in.hist
+  mat=rbind(mat,not.mat)
+  mat=mat[ref.ids,]
+  col.ramp=colorRamp2(c(min(mat),saturation.list[i]),c("white",colour.list[i]))
+  col.ramp2=colorRamp2(c(min(mat),saturation.list[i]),c("blue","red"))
+  for(n in classes){
+    ids=lookup$ID[lookup$class==n]
+    mat2=mat[rownames(mat)%in%ids,]
+    hm.plot=Heatmap(mat2,cluster_rows=F,cluster_columns=F,
+                     show_row_names=F,show_column_names=F,
+                  show_heatmap_legend=F,col=col.ramp,use_raster = T)
+    hm.plot2=Heatmap(mat2,cluster_rows=F,cluster_columns=F,
+                     show_row_names=F,show_column_names=F,
+                  show_heatmap_legend=F,col=col.ramp2,use_raster = T)
+    output.name=paste0("~/Enh_priming/Plots/Heatmaps/mouse/",i,"_",n,".jpg")
+    jpeg(output.name,w=1.5,h=5,units='in',res=600)
+    draw(hm.plot)
+    dev.off()
+        output.name=paste0("~/Enh_priming/Plots/Heatmaps/mouse/RB/",i,"_",n,".jpg")
+    jpeg(output.name,w=1.5,h=5,units='in',res=600)
+    draw(hm.plot2)
+    dev.off()
+    pb$tick()
+  }
+}
+
+```
+
